@@ -4,6 +4,10 @@ use std::{
     os::fd::{AsRawFd, OwnedFd},
 };
 
+use ansi::{AnsiParser, TerminalOutput};
+
+mod ansi;
+
 /// Spawn a shell in a child process and return the file descriptor used for I/O
 fn spawn_shell() -> OwnedFd {
     unsafe {
@@ -57,6 +61,14 @@ fn set_nonblock(fd: &OwnedFd) {
     nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(flags)).unwrap();
 }
 
+fn cursor_to_buffer_position(cursor_pos: &CursorPos, buf: &[u8]) -> usize {
+    let line_start = buf
+        .split(|b| *b == b'\n')
+        .take(cursor_pos.y)
+        .fold(0, |acc, item| acc + item.len());
+    line_start + cursor_pos.x
+}
+
 #[derive(Clone)]
 pub struct CursorPos {
     pub x: usize,
@@ -64,6 +76,7 @@ pub struct CursorPos {
 }
 
 pub struct TerminalEmulator {
+    output_buf: AnsiParser,
     buf: Vec<u8>,
     cursor_pos: CursorPos,
     fd: OwnedFd,
@@ -75,6 +88,7 @@ impl TerminalEmulator {
         set_nonblock(&fd);
 
         TerminalEmulator {
+            output_buf: AnsiParser::new(),
             buf: Vec::new(),
             cursor_pos: CursorPos { x: 0, y: 0 },
             fd,
@@ -98,8 +112,33 @@ impl TerminalEmulator {
             };
 
             let incoming = &buf[0..read_size];
-            update_cursor(incoming, &mut self.cursor_pos);
-            self.buf.extend_from_slice(incoming);
+            let parsed = self.output_buf.push(incoming);
+            for segment in parsed {
+                match segment {
+                    TerminalOutput::Data(data) => {
+                        update_cursor(&data, &mut self.cursor_pos);
+                        self.buf.extend_from_slice(&data);
+                    }
+                    TerminalOutput::SetCursorPos { x, y } => {
+                        self.cursor_pos.x = x - 1;
+                        self.cursor_pos.y = y - 1;
+                    }
+                    TerminalOutput::ClearForwards => {
+                        let buf_pos = cursor_to_buffer_position(&self.cursor_pos, &self.buf);
+                        self.buf = self.buf[..buf_pos].to_vec();
+                    }
+                    TerminalOutput::ClearBackwards => {
+                        // FIXME: Write a test to check expected behavior here, might expect
+                        // existing content to stay in the same position
+                        let buf_pos = cursor_to_buffer_position(&self.cursor_pos, &self.buf);
+                        self.buf = self.buf[buf_pos..].to_vec();
+                    }
+                    TerminalOutput::ClearAll => {
+                        self.buf.clear();
+                    }
+                    TerminalOutput::Invalid => {}
+                }
+            }
         }
 
         if let Err(e) = ret {
