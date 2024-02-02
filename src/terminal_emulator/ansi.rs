@@ -2,6 +2,7 @@
 pub enum SelectGraphicRendition {
     // NOTE: Non-exhaustive list
     Reset,
+    Bold,
     ForegroundBlack,
     ForegroundRed,
     ForegroundGreen,
@@ -25,6 +26,7 @@ impl SelectGraphicRendition {
     fn from_usize(val: usize) -> SelectGraphicRendition {
         match val {
             0 => SelectGraphicRendition::Reset,
+            1 => SelectGraphicRendition::Bold,
             30 => SelectGraphicRendition::ForegroundBlack,
             31 => SelectGraphicRendition::ForegroundRed,
             32 => SelectGraphicRendition::ForegroundGreen,

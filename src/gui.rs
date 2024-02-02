@@ -1,5 +1,11 @@
 use crate::terminal_emulator::{CursorState, TerminalColor, TerminalEmulator};
-use eframe::egui::{self, CentralPanel, Color32, Event, InputState, Key, Rect, TextStyle, Ui};
+use eframe::egui::{
+    self, CentralPanel, Color32, Event, FontData, FontDefinitions, FontFamily, InputState, Key,
+    Rect, TextStyle, Ui,
+};
+
+const REGULAR_FONT_NAME: &str = "hack";
+const BOLD_FONT_NAME: &str = "hack-bold";
 
 fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalEmulator) {
     for event in &input.events {
@@ -71,6 +77,37 @@ fn paint_cursor(
     );
 }
 
+fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+
+    fonts.font_data.insert(
+        REGULAR_FONT_NAME.to_owned(),
+        FontData::from_static(include_bytes!("../res/Hack-Regular.ttf")),
+    );
+
+    fonts.font_data.insert(
+        BOLD_FONT_NAME.to_owned(),
+        FontData::from_static(include_bytes!("../res/Hack-Bold.ttf")),
+    );
+
+    fonts
+        .families
+        .get_mut(&FontFamily::Monospace)
+        .unwrap()
+        .insert(0, REGULAR_FONT_NAME.to_owned());
+
+    fonts.families.insert(
+        FontFamily::Name(REGULAR_FONT_NAME.to_string().into()),
+        vec![REGULAR_FONT_NAME.to_string()],
+    );
+    fonts.families.insert(
+        FontFamily::Name(BOLD_FONT_NAME.to_string().into()),
+        vec![BOLD_FONT_NAME.to_string()],
+    );
+
+    ctx.set_fonts(fonts);
+}
+
 struct TermieGui {
     terminal_emulator: TerminalEmulator,
     character_size: Option<(f32, f32)>,
@@ -83,6 +120,7 @@ impl TermieGui {
         });
 
         cc.egui_ctx.set_pixels_per_point(2.0);
+        setup_fonts(&cc.egui_ctx);
 
         TermieGui {
             terminal_emulator,
@@ -116,10 +154,21 @@ impl eframe::App for TermieGui {
                 let mut textformat = job.sections[0].format.clone();
                 job.sections.clear();
                 let default_color = textformat.color;
+                let bold_font_family = FontFamily::Name(BOLD_FONT_NAME.to_string().into());
+                let regular_font_family = FontFamily::Name(REGULAR_FONT_NAME.to_string().into());
 
-                for (mut range, color) in self.terminal_emulator.colored_data() {
+                for tag in self.terminal_emulator.format_data() {
+                    let mut range = tag.start..tag.end;
+                    let color = tag.color;
+
                     if range.end == usize::MAX {
                         range.end = self.terminal_emulator.data().len()
+                    }
+
+                    if tag.bold {
+                        textformat.font_id.family = bold_font_family.clone();
+                    } else {
+                        textformat.font_id.family = regular_font_family.clone();
                     }
 
                     textformat.color = match color {
@@ -133,6 +182,7 @@ impl eframe::App for TermieGui {
                         TerminalColor::Cyan => Color32::from_rgb(0, 255, 255),
                         TerminalColor::White => Color32::WHITE,
                     };
+
                     job.sections.push(egui::text::LayoutSection {
                         leading_space: 0.0f32,
                         byte_range: range,
