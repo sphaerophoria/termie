@@ -1,6 +1,6 @@
 #[derive(Debug, Eq, PartialEq)]
 pub enum TerminalOutput {
-    SetCursorPos { x: usize, y: usize },
+    SetCursorPos { x: Option<usize>, y: Option<usize> },
     ClearForwards,
     ClearBackwards,
     ClearAll,
@@ -127,8 +127,16 @@ impl AnsiParser {
                     match parser.state {
                         CsiParserState::Finished(b'H') => {
                             output.push(TerminalOutput::SetCursorPos {
-                                x: parser.extract_param(0).unwrap_or(1),
-                                y: parser.extract_param(1).unwrap_or(1),
+                                x: Some(parser.extract_param(0).unwrap_or(1)),
+                                y: Some(parser.extract_param(1).unwrap_or(1)),
+                            });
+                            self.inner = AnsiParserInner::Empty;
+                        }
+                        CsiParserState::Finished(b'G') => {
+                            let x_pos = parser.extract_param(0).unwrap_or(1);
+                            output.push(TerminalOutput::SetCursorPos {
+                                x: Some(x_pos),
+                                y: None,
                             });
                             self.inner = AnsiParserInner::Empty;
                         }
@@ -178,42 +186,60 @@ mod test {
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
             parsed[0],
-            TerminalOutput::SetCursorPos { x: 32, y: 15 }
+            TerminalOutput::SetCursorPos {
+                x: Some(32),
+                y: Some(15)
+            }
         ));
 
         let parsed = output_buffer.push(b"\x1b[;32H");
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
             parsed[0],
-            TerminalOutput::SetCursorPos { x: 1, y: 32 }
+            TerminalOutput::SetCursorPos {
+                x: Some(1),
+                y: Some(32)
+            }
         ));
 
         let parsed = output_buffer.push(b"\x1b[32H");
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
             parsed[0],
-            TerminalOutput::SetCursorPos { x: 32, y: 1 }
+            TerminalOutput::SetCursorPos {
+                x: Some(32),
+                y: Some(1)
+            }
         ));
 
         let parsed = output_buffer.push(b"\x1b[32;H");
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
             parsed[0],
-            TerminalOutput::SetCursorPos { x: 32, y: 1 }
+            TerminalOutput::SetCursorPos {
+                x: Some(32),
+                y: Some(1)
+            }
         ));
 
         let parsed = output_buffer.push(b"\x1b[H");
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
             parsed[0],
-            TerminalOutput::SetCursorPos { x: 1, y: 1 }
+            TerminalOutput::SetCursorPos {
+                x: Some(1),
+                y: Some(1)
+            }
         ));
 
         let parsed = output_buffer.push(b"\x1b[;H");
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
             parsed[0],
-            TerminalOutput::SetCursorPos { x: 1, y: 1 }
+            TerminalOutput::SetCursorPos {
+                x: Some(1),
+                y: Some(1)
+            }
         ));
     }
 

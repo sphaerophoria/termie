@@ -120,8 +120,12 @@ impl TerminalEmulator {
                         self.buf.extend_from_slice(&data);
                     }
                     TerminalOutput::SetCursorPos { x, y } => {
-                        self.cursor_pos.x = x - 1;
-                        self.cursor_pos.y = y - 1;
+                        if let Some(x) = x {
+                            self.cursor_pos.x = x - 1;
+                        }
+                        if let Some(y) = y {
+                            self.cursor_pos.y = y - 1;
+                        }
                     }
                     TerminalOutput::ClearForwards => {
                         let buf_pos = cursor_to_buffer_position(&self.cursor_pos, &self.buf);
