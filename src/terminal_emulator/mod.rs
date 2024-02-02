@@ -69,6 +69,30 @@ fn cursor_to_buffer_position(cursor_pos: &CursorPos, buf: &[u8]) -> usize {
     line_start + cursor_pos.x
 }
 
+/// Inserts data at position in buf, extending if necessary
+fn insert_data_at_position(data: &[u8], pos: usize, buf: &mut Vec<u8>) {
+    assert!(
+        pos <= buf.len(),
+        "assume pos is never more than 1 past the end of the buffer"
+    );
+
+    if pos >= buf.len() {
+        assert_eq!(pos, buf.len());
+        buf.extend_from_slice(data);
+        return;
+    }
+
+    let amount_that_fits = buf.len() - pos;
+    let (data_to_copy, data_to_push): (&[u8], &[u8]) = if amount_that_fits > data.len() {
+        (&data, &[])
+    } else {
+        data.split_at(amount_that_fits)
+    };
+
+    buf[pos..pos + data_to_copy.len()].copy_from_slice(data_to_copy);
+    buf.extend_from_slice(data_to_push);
+}
+
 #[derive(Clone)]
 pub struct CursorPos {
     pub x: usize,
@@ -116,8 +140,9 @@ impl TerminalEmulator {
             for segment in parsed {
                 match segment {
                     TerminalOutput::Data(data) => {
+                        let output_start = cursor_to_buffer_position(&self.cursor_pos, &self.buf);
+                        insert_data_at_position(&data, output_start, &mut self.buf);
                         update_cursor(&data, &mut self.cursor_pos);
-                        self.buf.extend_from_slice(&data);
                     }
                     TerminalOutput::SetCursorPos { x, y } => {
                         if let Some(x) = x {
@@ -158,5 +183,26 @@ impl TerminalEmulator {
 
     pub fn cursor_pos(&self) -> CursorPos {
         self.cursor_pos.clone()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_cursor_data_insert() {
+        let mut buf = Vec::new();
+        insert_data_at_position(b"asdf", 0, &mut buf);
+        assert_eq!(buf, b"asdf");
+
+        insert_data_at_position(b"123", 0, &mut buf);
+        assert_eq!(buf, b"123f");
+
+        insert_data_at_position(b"xyzw", 4, &mut buf);
+        assert_eq!(buf, b"123fxyzw");
+
+        insert_data_at_position(b"asdf", 2, &mut buf);
+        assert_eq!(buf, b"12asdfzw");
     }
 }
