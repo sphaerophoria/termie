@@ -82,6 +82,8 @@ impl TermieGui {
             style.override_text_style = Some(TextStyle::Monospace);
         });
 
+        cc.egui_ctx.set_pixels_per_point(2.0);
+
         TermieGui {
             terminal_emulator,
             character_size: None,
