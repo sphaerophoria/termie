@@ -16,9 +16,9 @@ fn spawn_shell() -> OwnedFd {
         match res.fork_result {
             ForkResult::Parent { .. } => (),
             ForkResult::Child => {
-                let shell_name = CStr::from_bytes_with_nul(b"ash\0")
+                let shell_name = CStr::from_bytes_with_nul(b"bash\0")
                     .expect("Should always have null terminator");
-                let args: &[&[u8]] = &[b"ash\0", b"--noprofile\0", b"--norc\0"];
+                let args: &[&[u8]] = &[b"bash\0", b"--noprofile\0", b"--norc\0"];
 
                 let args: Vec<&'static CStr> = args
                     .iter()
