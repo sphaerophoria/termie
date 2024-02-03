@@ -1,9 +1,58 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectGraphicRendition {
+    // NOTE: Non-exhaustive list
+    Reset,
+    ForegroundBlack,
+    ForegroundRed,
+    ForegroundGreen,
+    ForegroundYellow,
+    ForegroundBlue,
+    ForegroundMagenta,
+    ForegroundCyan,
+    ForegroundWhite,
+    ForegroundBrightBlack,
+    ForegroundBrightRed,
+    ForegroundBrightGreen,
+    ForegroundBrightYellow,
+    ForegroundBrightBlue,
+    ForegroundBrightMagenta,
+    ForegroundBrightCyan,
+    ForegroundBrightWhite,
+    Unknown(usize),
+}
+
+impl SelectGraphicRendition {
+    fn from_usize(val: usize) -> SelectGraphicRendition {
+        match val {
+            0 => SelectGraphicRendition::Reset,
+            30 => SelectGraphicRendition::ForegroundBlack,
+            31 => SelectGraphicRendition::ForegroundRed,
+            32 => SelectGraphicRendition::ForegroundGreen,
+            33 => SelectGraphicRendition::ForegroundYellow,
+            34 => SelectGraphicRendition::ForegroundBlue,
+            35 => SelectGraphicRendition::ForegroundMagenta,
+            36 => SelectGraphicRendition::ForegroundCyan,
+            37 => SelectGraphicRendition::ForegroundWhite,
+            90 => SelectGraphicRendition::ForegroundBrightBlack,
+            91 => SelectGraphicRendition::ForegroundBrightRed,
+            92 => SelectGraphicRendition::ForegroundBrightGreen,
+            93 => SelectGraphicRendition::ForegroundBrightYellow,
+            94 => SelectGraphicRendition::ForegroundBrightBlue,
+            95 => SelectGraphicRendition::ForegroundBrightMagenta,
+            96 => SelectGraphicRendition::ForegroundBrightCyan,
+            97 => SelectGraphicRendition::ForegroundBrightWhite,
+            _ => Self::Unknown(val),
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum TerminalOutput {
     SetCursorPos { x: Option<usize>, y: Option<usize> },
     ClearForwards,
     ClearBackwards,
     ClearAll,
+    Sgr(SelectGraphicRendition),
     Data(Vec<u8>),
     Invalid,
 }
@@ -206,6 +255,36 @@ impl AnsiParser {
                             output.push(ret);
                             self.inner = AnsiParserInner::Empty;
                         }
+                        CsiParserState::Finished(b'm') => {
+                            let params =
+                                split_params_into_semicolon_delimited_usize(&parser.params);
+
+                            let Ok(mut params) = params else {
+                                println!("Invalid SGR sequence");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            if params.is_empty() {
+                                params.push(Some(0));
+                            }
+
+                            if params.len() == 1 && params[0].is_none() {
+                                params[0] = Some(0);
+                            }
+
+                            for param in params {
+                                let Some(param) = param else {
+                                    continue;
+                                };
+                                output.push(TerminalOutput::Sgr(
+                                    SelectGraphicRendition::from_usize(param),
+                                ));
+                            }
+
+                            self.inner = AnsiParserInner::Empty;
+                        }
                         CsiParserState::Finished(esc) => {
                             println!(
                                 "Unhandled csi code: {:?} {esc:x}",
@@ -235,7 +314,7 @@ impl AnsiParser {
 
 #[cfg(test)]
 mod test {
-    use super::{AnsiParser, TerminalOutput};
+    use super::*;
 
     #[test]
     fn test_set_cursor_position() {
@@ -365,5 +444,78 @@ mod test {
         assert!(matches!(parser.state, CsiParserState::Invalid));
         parser.push(b'm');
         assert!(matches!(parser.state, CsiParserState::InvalidFinished));
+    }
+
+    #[test]
+    fn test_empty_sgr() {
+        let mut output_buffer = AnsiParser::new();
+        let parsed = output_buffer.push(b"\x1b[m");
+        assert!(matches!(
+            parsed[0],
+            TerminalOutput::Sgr(SelectGraphicRendition::Reset)
+        ));
+    }
+
+    #[test]
+    fn test_color_parsing() {
+        let mut output_buffer = AnsiParser::new();
+
+        struct ColorCode(u8);
+
+        impl std::fmt::Display for ColorCode {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_fmt(format_args!("\x1b[{}m", self.0))
+            }
+        }
+
+        let mut test_input = String::new();
+        for i in 30..=37 {
+            test_input.push_str(&ColorCode(i).to_string());
+            test_input.push('a');
+        }
+
+        for i in 90..=97 {
+            test_input.push_str(&ColorCode(i).to_string());
+            test_input.push('a');
+        }
+
+        let output = output_buffer.push(test_input.as_bytes());
+        assert_eq!(
+            output,
+            &[
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundBlack),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundRed),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundGreen),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundYellow),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundBlue),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundMagenta),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundCyan),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundWhite),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundBrightBlack),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundBrightRed),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundBrightGreen),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundBrightYellow),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundBrightBlue),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundBrightMagenta),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundBrightCyan),
+                TerminalOutput::Data(b"a".into()),
+                TerminalOutput::Sgr(SelectGraphicRendition::ForegroundBrightWhite),
+                TerminalOutput::Data(b"a".into()),
+            ]
+        );
     }
 }

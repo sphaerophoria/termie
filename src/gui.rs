@@ -1,4 +1,4 @@
-use crate::terminal_emulator::{CursorPos, TerminalEmulator};
+use crate::terminal_emulator::{CursorState, TerminalColor, TerminalEmulator};
 use eframe::egui::{self, CentralPanel, Color32, Event, InputState, Key, Rect, TextStyle, Ui};
 
 fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalEmulator) {
@@ -38,7 +38,7 @@ fn get_char_size(ctx: &egui::Context) -> (f32, f32) {
 }
 
 fn character_to_cursor_offset(
-    character_pos: &CursorPos,
+    character_pos: &CursorState,
     character_size: &(f32, f32),
     content: &[u8],
 ) -> (f32, f32) {
@@ -52,7 +52,7 @@ fn character_to_cursor_offset(
 fn paint_cursor(
     label_rect: Rect,
     character_size: &(f32, f32),
-    cursor_pos: &CursorPos,
+    cursor_pos: &CursorState,
     terminal_buf: &[u8],
     ui: &mut Ui,
 ) {
@@ -105,8 +105,43 @@ impl eframe::App for TermieGui {
             });
 
             let response = unsafe {
+                let style = &ctx.style().text_styles[&TextStyle::Monospace];
+                let mut job = egui::text::LayoutJob::simple(
+                    std::str::from_utf8_unchecked(self.terminal_emulator.data()).to_string(),
+                    style.clone(),
+                    ctx.style().visuals.text_color(),
+                    ui.available_width(),
+                );
+
+                let mut textformat = job.sections[0].format.clone();
+                job.sections.clear();
+                let default_color = textformat.color;
+
+                for (mut range, color) in self.terminal_emulator.colored_data() {
+                    if range.end == usize::MAX {
+                        range.end = self.terminal_emulator.data().len()
+                    }
+
+                    textformat.color = match color {
+                        TerminalColor::Default => default_color,
+                        TerminalColor::Black => Color32::BLACK,
+                        TerminalColor::Red => Color32::RED,
+                        TerminalColor::Green => Color32::GREEN,
+                        TerminalColor::Yellow => Color32::YELLOW,
+                        TerminalColor::Blue => Color32::BLUE,
+                        TerminalColor::Magenta => Color32::from_rgb(255, 0, 255),
+                        TerminalColor::Cyan => Color32::from_rgb(0, 255, 255),
+                        TerminalColor::White => Color32::WHITE,
+                    };
+                    job.sections.push(egui::text::LayoutSection {
+                        leading_space: 0.0f32,
+                        byte_range: range,
+                        format: textformat.clone(),
+                    });
+                }
+
                 // FIXME: Brakes something for sure
-                ui.label(std::str::from_utf8_unchecked(self.terminal_emulator.data()))
+                ui.label(job)
             };
 
             paint_cursor(
