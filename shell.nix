@@ -5,6 +5,8 @@ pkgs.mkShell {
     rustup
     rust-analyzer
     rustPlatform.bindgenHook
+    # For linter script on push hook
+    python3
   ];
 
   buildInputs = with pkgs; [
