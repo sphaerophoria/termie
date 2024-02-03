@@ -9,70 +9,101 @@ pub enum TerminalOutput {
 }
 
 enum CsiParserState {
-    Params(Vec<u8>),
+    Params,
+    Intermediates,
     Finished(u8),
     Invalid,
-}
-
-fn finalize_csi_buf(buf: &[u8]) -> Option<usize> {
-    if buf.is_empty() {
-        return None;
-    }
-    Some(
-        std::str::from_utf8(buf)
-            .expect("Ascii digits should always result in a valid utf8 string")
-            .parse()
-            .expect("Digits should always parse as usize"),
-    )
+    InvalidFinished,
 }
 
 fn is_csi_terminator(b: u8) -> bool {
-    matches!(
-        b,
-        b'A' | b'B' | b'C' | b'D' | b'E' | b'F' | b'G' | b'H' | b'J' | b'K' | b'S' | b'T' | b'f'
-    )
+    (0x40..=0x7d).contains(&b)
+}
+
+fn is_csi_param(b: u8) -> bool {
+    (0x30..=0x3f).contains(&b)
+}
+
+fn is_csi_intermediate(b: u8) -> bool {
+    (0x20..=0x2f).contains(&b)
+}
+
+fn extract_param(idx: usize, params: &[Option<usize>]) -> Option<usize> {
+    params.get(idx).copied().flatten()
+}
+
+fn split_params_into_semicolon_delimited_usize(params: &[u8]) -> Result<Vec<Option<usize>>, ()> {
+    let params = params
+        .split(|b| *b == b';')
+        .map(parse_param_as_usize)
+        .collect::<Result<Vec<Option<usize>>, ()>>();
+
+    params
+}
+
+fn parse_param_as_usize(param_bytes: &[u8]) -> Result<Option<usize>, ()> {
+    let param_str =
+        std::str::from_utf8(param_bytes).expect("parameter should always be valid utf8");
+    if param_str.is_empty() {
+        return Ok(None);
+    }
+    let param = param_str.parse().map_err(|_| ())?;
+    Ok(Some(param))
 }
 
 struct CsiParser {
     state: CsiParserState,
-    params: Vec<Option<usize>>,
+    params: Vec<u8>,
+    intermediates: Vec<u8>,
 }
 
 impl CsiParser {
     fn new() -> CsiParser {
         CsiParser {
-            state: CsiParserState::Params(Vec::new()),
+            state: CsiParserState::Params,
             params: Vec::new(),
+            intermediates: Vec::new(),
         }
     }
 
     fn push(&mut self, b: u8) {
-        if let CsiParserState::Finished(_) | CsiParserState::Invalid = &self.state {
+        if let CsiParserState::Finished(_) | CsiParserState::InvalidFinished = &self.state {
             panic!("CsiParser should not be pushed to once finished");
         }
 
         match &mut self.state {
-            CsiParserState::Params(buf) => {
-                if is_csi_terminator(b) {
-                    self.params.push(finalize_csi_buf(buf));
+            CsiParserState::Params => {
+                if is_csi_param(b) {
+                    self.params.push(b);
+                } else if is_csi_intermediate(b) {
+                    self.intermediates.push(b);
+                    self.state = CsiParserState::Intermediates;
+                } else if is_csi_terminator(b) {
                     self.state = CsiParserState::Finished(b);
-                } else if b == b';' {
-                    self.params.push(finalize_csi_buf(buf));
-                    buf.clear();
-                } else if b.is_ascii_digit() {
-                    buf.push(b);
                 } else {
                     self.state = CsiParserState::Invalid
                 }
             }
-            CsiParserState::Finished(_) | CsiParserState::Invalid => {
+            CsiParserState::Intermediates => {
+                if is_csi_param(b) {
+                    self.state = CsiParserState::Invalid;
+                } else if is_csi_intermediate(b) {
+                    self.intermediates.push(b);
+                } else if is_csi_terminator(b) {
+                    self.state = CsiParserState::Finished(b);
+                } else {
+                    self.state = CsiParserState::Invalid
+                }
+            }
+            CsiParserState::Invalid => {
+                if is_csi_terminator(b) {
+                    self.state = CsiParserState::InvalidFinished;
+                }
+            }
+            CsiParserState::Finished(_) | CsiParserState::InvalidFinished => {
                 unreachable!();
             }
         }
-    }
-
-    fn extract_param(&self, i: usize) -> Option<usize> {
-        self.params.get(i).copied().flatten()
     }
 }
 
@@ -126,14 +157,32 @@ impl AnsiParser {
                     parser.push(*b);
                     match parser.state {
                         CsiParserState::Finished(b'H') => {
+                            let params =
+                                split_params_into_semicolon_delimited_usize(&parser.params);
+
+                            let Ok(params) = params else {
+                                println!("Invalid cursor set position sequence");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
                             output.push(TerminalOutput::SetCursorPos {
-                                x: Some(parser.extract_param(0).unwrap_or(1)),
-                                y: Some(parser.extract_param(1).unwrap_or(1)),
+                                x: Some(extract_param(0, &params).unwrap_or(1)),
+                                y: Some(extract_param(1, &params).unwrap_or(1)),
                             });
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'G') => {
-                            let x_pos = parser.extract_param(0).unwrap_or(1);
+                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                                println!("Invalid cursor set position sequence");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            let x_pos = param.unwrap_or(1);
+
                             output.push(TerminalOutput::SetCursorPos {
                                 x: Some(x_pos),
                                 y: None,
@@ -141,7 +190,14 @@ impl AnsiParser {
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'J') => {
-                            let ret = match parser.extract_param(0).unwrap_or(0) {
+                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                                println!("Invalid clear command");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            let ret = match param.unwrap_or(0) {
                                 0 => TerminalOutput::ClearForwards,
                                 1 => TerminalOutput::ClearBackwards,
                                 2 | 3 => TerminalOutput::ClearAll,
@@ -155,9 +211,11 @@ impl AnsiParser {
                                 "Unhandled csi code: {:?} {esc:x}",
                                 std::char::from_u32(esc as u32)
                             );
+                            output.push(TerminalOutput::Invalid);
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Invalid => {
+                            println!("Invalid CSI sequence");
                             output.push(TerminalOutput::Invalid);
                             self.inner = AnsiParserInner::Empty;
                         }
@@ -283,5 +341,29 @@ mod test {
         let mut output_buffer = AnsiParser::new();
         let parsed = output_buffer.push(b"\x1b[asdf");
         assert!(matches!(parsed[0], TerminalOutput::Invalid));
+    }
+
+    #[test]
+    fn test_parsing_unknown_csi() {
+        let mut parser = CsiParser::new();
+        for b in b"0123456789:;<=>?!\"#$%&'()*+,-./}" {
+            parser.push(*b);
+        }
+
+        assert_eq!(parser.params, b"0123456789:;<=>?");
+        assert_eq!(parser.intermediates, b"!\"#$%&'()*+,-./");
+        assert!(matches!(parser.state, CsiParserState::Finished(b'}')));
+    }
+
+    #[test]
+    fn test_parsing_invalid_csi() {
+        let mut parser = CsiParser::new();
+        for b in b"0$0" {
+            parser.push(*b);
+        }
+
+        assert!(matches!(parser.state, CsiParserState::Invalid));
+        parser.push(b'm');
+        assert!(matches!(parser.state, CsiParserState::InvalidFinished));
     }
 }
