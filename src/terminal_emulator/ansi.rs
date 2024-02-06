@@ -52,7 +52,6 @@ impl SelectGraphicRendition {
 pub enum TerminalOutput {
     SetCursorPos { x: Option<usize>, y: Option<usize> },
     ClearForwards,
-    ClearBackwards,
     ClearAll,
     Sgr(SelectGraphicRendition),
     Data(Vec<u8>),
@@ -250,7 +249,6 @@ impl AnsiParser {
 
                             let ret = match param.unwrap_or(0) {
                                 0 => TerminalOutput::ClearForwards,
-                                1 => TerminalOutput::ClearBackwards,
                                 2 | 3 => TerminalOutput::ClearAll,
                                 _ => TerminalOutput::Invalid,
                             };
@@ -393,11 +391,6 @@ mod test {
         let parsed = output_buffer.push(b"\x1b[0J");
         assert_eq!(parsed.len(), 1);
         assert!(matches!(parsed[0], TerminalOutput::ClearForwards,));
-
-        let mut output_buffer = AnsiParser::new();
-        let parsed = output_buffer.push(b"\x1b[1J");
-        assert_eq!(parsed.len(), 1);
-        assert!(matches!(parsed[0], TerminalOutput::ClearBackwards,));
 
         let mut output_buffer = AnsiParser::new();
         let parsed = output_buffer.push(b"\x1b[2J");

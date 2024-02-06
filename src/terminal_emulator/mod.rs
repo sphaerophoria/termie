@@ -362,13 +362,6 @@ impl TerminalEmulator {
                             .push_range(&self.cursor_pos, buf_pos..usize::MAX);
                         self.buf = self.buf[..buf_pos].to_vec();
                     }
-                    TerminalOutput::ClearBackwards => {
-                        // FIXME: Write a test to check expected behavior here, might expect
-                        // existing content to stay in the same position
-                        // FIXME: Track color
-                        let buf_pos = cursor_to_buffer_position(&self.cursor_pos, &self.buf);
-                        self.buf = self.buf[buf_pos..].to_vec();
-                    }
                     TerminalOutput::ClearAll => {
                         self.color_tracker
                             .push_range(&self.cursor_pos, 0..usize::MAX);
