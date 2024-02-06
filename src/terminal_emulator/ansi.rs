@@ -185,6 +185,11 @@ impl AnsiParser {
                         continue;
                     }
 
+                    if *b == b'\r' {
+                        // Currently carriage returns are not handled properly, so we swallow them
+                        continue;
+                    }
+
                     data_output.push(*b);
                 }
                 AnsiParserInner::Escape => {
