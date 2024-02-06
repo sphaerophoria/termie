@@ -67,7 +67,7 @@ enum CsiParserState {
 }
 
 fn is_csi_terminator(b: u8) -> bool {
-    (0x40..=0x7d).contains(&b)
+    (0x40..=0x7e).contains(&b)
 }
 
 fn is_csi_param(b: u8) -> bool {
@@ -427,6 +427,20 @@ mod test {
         assert_eq!(parser.params, b"0123456789:;<=>?");
         assert_eq!(parser.intermediates, b"!\"#$%&'()*+,-./");
         assert!(matches!(parser.state, CsiParserState::Finished(b'}')));
+
+        let mut parser = CsiParser::new();
+        parser.push(0x40);
+
+        assert_eq!(parser.params, &[]);
+        assert_eq!(parser.intermediates, &[]);
+        assert!(matches!(parser.state, CsiParserState::Finished(0x40)));
+
+        let mut parser = CsiParser::new();
+        parser.push(0x7e);
+
+        assert_eq!(parser.params, &[]);
+        assert_eq!(parser.intermediates, &[]);
+        assert!(matches!(parser.state, CsiParserState::Finished(0x7e)));
     }
 
     #[test]
