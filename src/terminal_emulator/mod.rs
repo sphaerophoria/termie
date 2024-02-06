@@ -298,7 +298,7 @@ pub struct TerminalEmulator {
     parser: AnsiParser,
     buf: Vec<u8>,
     format_tracker: FormatTracker,
-    cursor_pos: CursorState,
+    cursor_state: CursorState,
     fd: OwnedFd,
 }
 
@@ -311,7 +311,7 @@ impl TerminalEmulator {
             parser: AnsiParser::new(),
             buf: Vec::new(),
             format_tracker: FormatTracker::new(),
-            cursor_pos: CursorState {
+            cursor_state: CursorState {
                 x: 0,
                 y: 0,
                 bold: false,
@@ -342,40 +342,42 @@ impl TerminalEmulator {
             for segment in parsed {
                 match segment {
                     TerminalOutput::Data(data) => {
-                        let output_start = cursor_to_buffer_position(&self.cursor_pos, &self.buf);
+                        let output_start = cursor_to_buffer_position(&self.cursor_state, &self.buf);
                         insert_data_at_position(&data, output_start, &mut self.buf);
-                        self.format_tracker
-                            .push_range(&self.cursor_pos, output_start..output_start + data.len());
-                        update_cursor(&data, &mut self.cursor_pos);
+                        self.format_tracker.push_range(
+                            &self.cursor_state,
+                            output_start..output_start + data.len(),
+                        );
+                        update_cursor(&data, &mut self.cursor_state);
                     }
                     TerminalOutput::SetCursorPos { x, y } => {
                         if let Some(x) = x {
-                            self.cursor_pos.x = x - 1;
+                            self.cursor_state.x = x - 1;
                         }
                         if let Some(y) = y {
-                            self.cursor_pos.y = y - 1;
+                            self.cursor_state.y = y - 1;
                         }
                     }
                     TerminalOutput::ClearForwards => {
-                        let buf_pos = cursor_to_buffer_position(&self.cursor_pos, &self.buf);
+                        let buf_pos = cursor_to_buffer_position(&self.cursor_state, &self.buf);
                         self.format_tracker
-                            .push_range(&self.cursor_pos, buf_pos..usize::MAX);
+                            .push_range(&self.cursor_state, buf_pos..usize::MAX);
                         self.buf = self.buf[..buf_pos].to_vec();
                     }
                     TerminalOutput::ClearAll => {
                         self.format_tracker
-                            .push_range(&self.cursor_pos, 0..usize::MAX);
+                            .push_range(&self.cursor_state, 0..usize::MAX);
                         self.buf.clear();
                     }
                     TerminalOutput::Sgr(sgr) => {
                         // Should this be one big match ???????
                         if let Some(color) = TerminalColor::from_sgr(sgr) {
-                            self.cursor_pos.color = color;
+                            self.cursor_state.color = color;
                         } else if sgr == SelectGraphicRendition::Reset {
-                            self.cursor_pos.color = TerminalColor::Default;
-                            self.cursor_pos.bold = false;
+                            self.cursor_state.color = TerminalColor::Default;
+                            self.cursor_state.bold = false;
                         } else if sgr == SelectGraphicRendition::Bold {
-                            self.cursor_pos.bold = true;
+                            self.cursor_state.bold = true;
                         } else {
                             println!("Unhandled sgr: {:?}", sgr);
                         }
@@ -401,7 +403,7 @@ impl TerminalEmulator {
     }
 
     pub fn cursor_pos(&self) -> CursorState {
-        self.cursor_pos.clone()
+        self.cursor_state.clone()
     }
 }
 
