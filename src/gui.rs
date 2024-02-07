@@ -1,4 +1,4 @@
-use crate::terminal_emulator::{CursorState, TerminalColor, TerminalEmulator};
+use crate::terminal_emulator::{CursorPos, TerminalColor, TerminalEmulator};
 use eframe::egui::{
     self, CentralPanel, Color32, Event, FontData, FontDefinitions, FontFamily, InputState, Key,
     Rect, TextStyle, Ui,
@@ -44,7 +44,7 @@ fn get_char_size(ctx: &egui::Context) -> (f32, f32) {
 }
 
 fn character_to_cursor_offset(
-    character_pos: &CursorState,
+    character_pos: &CursorPos,
     character_size: &(f32, f32),
     content: &[u8],
 ) -> (f32, f32) {
@@ -58,7 +58,7 @@ fn character_to_cursor_offset(
 fn paint_cursor(
     label_rect: Rect,
     character_size: &(f32, f32),
-    cursor_pos: &CursorState,
+    cursor_pos: &CursorPos,
     terminal_buf: &[u8],
     ui: &mut Ui,
 ) {

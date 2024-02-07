@@ -39,7 +39,7 @@ fn spawn_shell() -> OwnedFd {
     }
 }
 
-fn update_cursor(incoming: &[u8], cursor: &mut CursorState) {
+fn update_cursor(incoming: &[u8], cursor: &mut CursorPos) {
     for c in incoming {
         match c {
             b'\n' => {
@@ -200,9 +200,14 @@ fn adjust_existing_format_ranges(existing: &mut Vec<FormatTag>, range: &Range<us
 }
 
 #[derive(Clone)]
-pub struct CursorState {
+pub struct CursorPos {
     pub x: usize,
     pub y: usize,
+}
+
+#[derive(Clone)]
+pub struct CursorState {
+    pos: CursorPos,
     bold: bool,
     color: TerminalColor,
 }
@@ -312,8 +317,7 @@ impl TerminalEmulator {
             buf: Vec::new(),
             format_tracker: FormatTracker::new(),
             cursor_state: CursorState {
-                x: 0,
-                y: 0,
+                pos: CursorPos { x: 0, y: 0 },
                 bold: false,
                 color: TerminalColor::Default,
             },
@@ -348,14 +352,14 @@ impl TerminalEmulator {
                             &self.cursor_state,
                             output_start..output_start + data.len(),
                         );
-                        update_cursor(&data, &mut self.cursor_state);
+                        update_cursor(&data, &mut self.cursor_state.pos);
                     }
                     TerminalOutput::SetCursorPos { x, y } => {
                         if let Some(x) = x {
-                            self.cursor_state.x = x - 1;
+                            self.cursor_state.pos.x = x - 1;
                         }
                         if let Some(y) = y {
-                            self.cursor_state.y = y - 1;
+                            self.cursor_state.pos.y = y - 1;
                         }
                     }
                     TerminalOutput::ClearForwards => {
@@ -402,8 +406,8 @@ impl TerminalEmulator {
         self.format_tracker.tags()
     }
 
-    pub fn cursor_pos(&self) -> CursorState {
-        self.cursor_state.clone()
+    pub fn cursor_pos(&self) -> CursorPos {
+        self.cursor_state.pos.clone()
     }
 }
 
@@ -431,8 +435,7 @@ mod test {
     fn basic_color_tracker_test() {
         let mut format_tracker = FormatTracker::new();
         let mut cursor_state = CursorState {
-            x: 0,
-            y: 0,
+            pos: CursorPos { x: 0, y: 0 },
             color: TerminalColor::Default,
             bold: false,
         };
