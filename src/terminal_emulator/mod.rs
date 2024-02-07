@@ -39,20 +39,6 @@ fn spawn_shell() -> OwnedFd {
     }
 }
 
-fn update_cursor(incoming: &[u8], cursor: &mut CursorPos) {
-    for c in incoming {
-        match c {
-            b'\n' => {
-                cursor.x = 0;
-                cursor.y += 1;
-            }
-            _ => {
-                cursor.x += 1;
-            }
-        }
-    }
-}
-
 fn set_nonblock(fd: &OwnedFd) {
     let flags = nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL).unwrap();
     let mut flags =
@@ -60,38 +46,6 @@ fn set_nonblock(fd: &OwnedFd) {
     flags.set(nix::fcntl::OFlag::O_NONBLOCK, true);
 
     nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(flags)).unwrap();
-}
-
-fn cursor_to_buffer_position(cursor_pos: &CursorState, buf: &[u8]) -> usize {
-    let line_start = buf
-        .split(|b| *b == b'\n')
-        .take(cursor_pos.y)
-        .fold(0, |acc, item| acc + item.len() + 1);
-    line_start + cursor_pos.x
-}
-
-/// Inserts data at position in buf, extending if necessary
-fn insert_data_at_position(data: &[u8], pos: usize, buf: &mut Vec<u8>) {
-    assert!(
-        pos <= buf.len(),
-        "assume pos is never more than 1 past the end of the buffer"
-    );
-
-    if pos >= buf.len() {
-        assert_eq!(pos, buf.len());
-        buf.extend_from_slice(data);
-        return;
-    }
-
-    let amount_that_fits = buf.len() - pos;
-    let (data_to_copy, data_to_push): (&[u8], &[u8]) = if amount_that_fits > data.len() {
-        (&data, &[])
-    } else {
-        data.split_at(amount_that_fits)
-    };
-
-    buf[pos..pos + data_to_copy.len()].copy_from_slice(data_to_copy);
-    buf.extend_from_slice(data_to_push);
 }
 
 fn delete_items_from_vec<T>(mut to_delete: Vec<usize>, vec: &mut Vec<T>) {
@@ -206,7 +160,7 @@ pub struct CursorPos {
 }
 
 #[derive(Clone)]
-pub struct CursorState {
+struct CursorState {
     pos: CursorPos,
     bold: bool,
     color: TerminalColor,
@@ -299,9 +253,161 @@ impl FormatTracker {
     }
 }
 
+/// Calculate the indexes of the start and end of each line in the buffer given an input width.
+/// Ranges do not include newlines. If a newline appears past the width, it does not result in an
+/// extra line
+///
+/// Example
+/// ```
+/// let ranges = calc_line_ranges(b"12\n1234\n12345", 4);
+/// assert_eq!(ranges, [0..2, 3..7, 8..11, 12..13]);
+/// ```
+fn calc_line_ranges(buf: &[u8], width: usize) -> Vec<Range<usize>> {
+    let mut ret = vec![];
+    let mut bytes_since_newline = 0;
+
+    let mut current_start = 0;
+
+    for (i, c) in buf.iter().enumerate() {
+        if *c == b'\n' {
+            ret.push(current_start..i);
+            current_start = i + 1;
+            bytes_since_newline = 0;
+            continue;
+        }
+
+        assert!(bytes_since_newline <= width);
+        if bytes_since_newline == width {
+            ret.push(current_start..i);
+            current_start = i;
+            bytes_since_newline = 0;
+            continue;
+        }
+
+        bytes_since_newline += 1;
+    }
+
+    if buf.len() > current_start {
+        ret.push(current_start..buf.len());
+    }
+    ret
+}
+
+fn buf_to_cursor_pos(buf: &[u8], width: usize, buf_pos: usize) -> CursorPos {
+    let new_line_ranges = calc_line_ranges(buf, width);
+    let (new_cursor_y, new_cursor_line) = new_line_ranges
+        .iter()
+        .enumerate()
+        .find(|(_i, r)| r.end >= buf_pos)
+        .unwrap();
+    let new_cursor_x = buf_pos - new_cursor_line.start;
+    CursorPos {
+        x: new_cursor_x,
+        y: new_cursor_y,
+    }
+}
+
+fn unwrapped_line_end_pos(buf: &[u8], start_pos: usize) -> usize {
+    buf.iter()
+        .enumerate()
+        .skip(start_pos)
+        .find_map(|(i, c)| match *c {
+            b'\n' => Some(i),
+            _ => None,
+        })
+        .unwrap_or(buf.len())
+}
+
+fn pad_buffer_for_write(
+    buf: &mut Vec<u8>,
+    width: usize,
+    cursor_pos: &CursorPos,
+    write_len: usize,
+) -> usize {
+    let mut line_ranges = calc_line_ranges(buf, width);
+
+    for _ in line_ranges.len()..cursor_pos.y + 1 {
+        buf.push(b'\n');
+        let newline_pos = buf.len() - 1;
+        line_ranges.push(newline_pos..newline_pos);
+    }
+
+    let line_range = &line_ranges[cursor_pos.y];
+
+    let desired_start = line_range.start + cursor_pos.x;
+    let desired_end = desired_start + write_len;
+
+    // NOTE: We only want to pad if we hit an early newline. If we wrapped because we hit the edge
+    // of the screen we can just keep writing and the wrapping will stay as is. This is an
+    // important distinction because in the no-newline case we want to make sure we overwrite
+    // whatever was in the buffer before
+    let actual_end = unwrapped_line_end_pos(buf, line_range.start);
+
+    let number_of_spaces = if desired_end > actual_end {
+        desired_end - actual_end
+    } else {
+        0
+    };
+
+    for i in 0..number_of_spaces {
+        buf.insert(actual_end + i, b' ');
+    }
+
+    desired_start
+}
+
+struct TerminalBufferInsertResponse {
+    written_range: Range<usize>,
+    new_cursor_pos: CursorPos,
+}
+
+struct TerminalBuffer {
+    buf: Vec<u8>,
+    width: usize,
+}
+
+impl TerminalBuffer {
+    fn new(width: usize) -> TerminalBuffer {
+        TerminalBuffer { buf: vec![], width }
+    }
+
+    fn insert_data(&mut self, cursor_pos: &CursorPos, data: &[u8]) -> TerminalBufferInsertResponse {
+        let write_idx = pad_buffer_for_write(&mut self.buf, self.width, cursor_pos, data.len());
+        let write_range = write_idx..write_idx + data.len();
+        self.buf[write_range.clone()].copy_from_slice(data);
+        let new_cursor_pos = buf_to_cursor_pos(&self.buf, self.width, write_range.end);
+        TerminalBufferInsertResponse {
+            written_range: write_range,
+            new_cursor_pos,
+        }
+    }
+
+    fn clear_forwards(&mut self, cursor_pos: &CursorPos) -> Option<usize> {
+        let line_ranges = calc_line_ranges(&self.buf, self.width);
+
+        let line_range = line_ranges.get(cursor_pos.y)?;
+
+        if cursor_pos.x > line_range.end {
+            return None;
+        }
+
+        let clear_pos = line_range.start + cursor_pos.x;
+        self.buf.truncate(clear_pos);
+        Some(clear_pos)
+    }
+
+    fn clear_all(&mut self) {
+        self.buf.clear();
+    }
+
+    fn data(&self) -> &[u8] {
+        &self.buf
+    }
+}
+
 pub struct TerminalEmulator {
     parser: AnsiParser,
-    buf: Vec<u8>,
+    terminal_buffer: TerminalBuffer,
     format_tracker: FormatTracker,
     cursor_state: CursorState,
     fd: OwnedFd,
@@ -314,7 +420,9 @@ impl TerminalEmulator {
 
         TerminalEmulator {
             parser: AnsiParser::new(),
-            buf: Vec::new(),
+            // FIXME: Should be provided by GUI (or updated)
+            // Initial size matches bash default
+            terminal_buffer: TerminalBuffer::new(80),
             format_tracker: FormatTracker::new(),
             cursor_state: CursorState {
                 pos: CursorPos { x: 0, y: 0 },
@@ -346,13 +454,12 @@ impl TerminalEmulator {
             for segment in parsed {
                 match segment {
                     TerminalOutput::Data(data) => {
-                        let output_start = cursor_to_buffer_position(&self.cursor_state, &self.buf);
-                        insert_data_at_position(&data, output_start, &mut self.buf);
-                        self.format_tracker.push_range(
-                            &self.cursor_state,
-                            output_start..output_start + data.len(),
-                        );
-                        update_cursor(&data, &mut self.cursor_state.pos);
+                        let response = self
+                            .terminal_buffer
+                            .insert_data(&self.cursor_state.pos, &data);
+                        self.format_tracker
+                            .push_range(&self.cursor_state, response.written_range);
+                        self.cursor_state.pos = response.new_cursor_pos;
                     }
                     TerminalOutput::SetCursorPos { x, y } => {
                         if let Some(x) = x {
@@ -363,15 +470,17 @@ impl TerminalEmulator {
                         }
                     }
                     TerminalOutput::ClearForwards => {
-                        let buf_pos = cursor_to_buffer_position(&self.cursor_state, &self.buf);
-                        self.format_tracker
-                            .push_range(&self.cursor_state, buf_pos..usize::MAX);
-                        self.buf = self.buf[..buf_pos].to_vec();
+                        if let Some(buf_pos) =
+                            self.terminal_buffer.clear_forwards(&self.cursor_state.pos)
+                        {
+                            self.format_tracker
+                                .push_range(&self.cursor_state, buf_pos..usize::MAX);
+                        }
                     }
                     TerminalOutput::ClearAll => {
                         self.format_tracker
                             .push_range(&self.cursor_state, 0..usize::MAX);
-                        self.buf.clear();
+                        self.terminal_buffer.clear_all();
                     }
                     TerminalOutput::Sgr(sgr) => {
                         // Should this be one big match ???????
@@ -399,7 +508,7 @@ impl TerminalEmulator {
     }
 
     pub fn data(&self) -> &[u8] {
-        &self.buf
+        self.terminal_buffer.data()
     }
 
     pub fn format_data(&self) -> Vec<FormatTag> {
@@ -414,22 +523,6 @@ impl TerminalEmulator {
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn test_cursor_data_insert() {
-        let mut buf = Vec::new();
-        insert_data_at_position(b"asdf", 0, &mut buf);
-        assert_eq!(buf, b"asdf");
-
-        insert_data_at_position(b"123", 0, &mut buf);
-        assert_eq!(buf, b"123f");
-
-        insert_data_at_position(b"xyzw", 4, &mut buf);
-        assert_eq!(buf, b"123fxyzw");
-
-        insert_data_at_position(b"asdf", 2, &mut buf);
-        assert_eq!(buf, b"12asdfzw");
-    }
 
     #[test]
     fn basic_color_tracker_test() {
@@ -600,5 +693,83 @@ mod test {
         assert!(ranges_overlap(5..10, 2..12));
         assert!(!ranges_overlap(5..10, 10..12));
         assert!(!ranges_overlap(5..10, 0..5));
+    }
+
+    #[test]
+    fn test_calc_line_ranges() {
+        let line_starts = calc_line_ranges(b"asdf\n0123456789\n012345678901", 10);
+        assert_eq!(line_starts, &[0..4, 5..15, 16..26, 26..28]);
+    }
+
+    #[test]
+    fn test_buffer_padding() {
+        let mut buf = b"asdf\n1234\nzxyw".to_vec();
+
+        let cursor_pos = CursorPos { x: 8, y: 0 };
+        let copy_idx = pad_buffer_for_write(&mut buf, 10, &cursor_pos, 10);
+        assert_eq!(buf, b"asdf              \n1234\nzxyw");
+        assert_eq!(copy_idx, 8);
+    }
+
+    #[test]
+    fn test_canvas_clear_forwards() {
+        let mut buffer = TerminalBuffer::new(5);
+        buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"012\n3456789");
+        buffer.clear_forwards(&CursorPos { x: 1, y: 1 });
+        assert_eq!(buffer.data(), b"012\n3");
+    }
+
+    #[test]
+    fn test_canvas_clear() {
+        let mut buffer = TerminalBuffer::new(5);
+        buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"0123456789");
+        buffer.clear_all();
+        assert_eq!(buffer.data(), &[]);
+    }
+
+    #[test]
+    fn test_terminal_buffer_overwrite_early_newline() {
+        let mut buffer = TerminalBuffer::new(5);
+        buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"012\n3456789");
+        assert_eq!(buffer.data(), b"012\n3456789\n");
+
+        // Cursor pos should be calculated based off wrapping at column 5, but should not result in
+        // an extra newline
+        buffer.insert_data(&CursorPos { x: 2, y: 1 }, b"test");
+        assert_eq!(buffer.data(), b"012\n34test9\n");
+    }
+
+    #[test]
+    fn test_terminal_buffer_overwrite_no_newline() {
+        let mut buffer = TerminalBuffer::new(5);
+        buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"0123456789");
+        assert_eq!(buffer.data(), b"0123456789\n");
+
+        // Cursor pos should be calculated based off wrapping at column 5, but should not result in
+        // an extra newline
+        buffer.insert_data(&CursorPos { x: 2, y: 1 }, b"test");
+        assert_eq!(buffer.data(), b"0123456test\n");
+    }
+
+    #[test]
+    fn test_terminal_buffer_overwrite_late_newline() {
+        // This should behave exactly as test_terminal_buffer_overwrite_no_newline(), except with a
+        // neline between lines 1 and 2
+        let mut buffer = TerminalBuffer::new(5);
+        buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"01234\n56789");
+        assert_eq!(buffer.data(), b"01234\n56789\n");
+
+        buffer.insert_data(&CursorPos { x: 2, y: 1 }, b"test");
+        assert_eq!(buffer.data(), b"01234\n56test\n");
+    }
+
+    #[test]
+    fn test_terminal_buffer_insert_unallocated_data() {
+        let mut buffer = TerminalBuffer::new(10);
+        buffer.insert_data(&CursorPos { x: 4, y: 5 }, b"hello world");
+        assert_eq!(buffer.data(), b"\n\n\n\n\n    hello world\n");
+
+        buffer.insert_data(&CursorPos { x: 3, y: 2 }, b"hello world");
+        assert_eq!(buffer.data(), b"\n\n   hello world\n\n\n    hello world\n");
     }
 }
