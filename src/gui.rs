@@ -43,33 +43,21 @@ fn get_char_size(ctx: &egui::Context) -> (f32, f32) {
     })
 }
 
-fn character_to_cursor_offset(
-    character_pos: &CursorPos,
-    character_size: &(f32, f32),
-    content: &[u8],
-) -> (f32, f32) {
-    let content_by_lines: Vec<&[u8]> = content.split(|b| *b == b'\n').collect();
-    let num_lines = content_by_lines.len();
-    let x_offset = character_pos.x as f32 * character_size.0;
-    let y_offset = (character_pos.y as i64 - num_lines as i64) as f32 * character_size.1;
-    (x_offset, y_offset)
-}
-
 fn paint_cursor(
     label_rect: Rect,
     character_size: &(f32, f32),
     cursor_pos: &CursorPos,
-    terminal_buf: &[u8],
     ui: &mut Ui,
 ) {
     let painter = ui.painter();
 
-    let bottom = label_rect.bottom();
+    let top = label_rect.top();
     let left = label_rect.left();
-    let cursor_offset = character_to_cursor_offset(cursor_pos, character_size, terminal_buf);
+    let y_offset = cursor_pos.y as f32 * character_size.1;
+    let x_offset = cursor_pos.x as f32 * character_size.0;
     painter.rect_filled(
         Rect::from_min_size(
-            egui::pos2(left + cursor_offset.0, bottom + cursor_offset.1),
+            egui::pos2(left + x_offset, top + y_offset),
             egui::vec2(character_size.0, character_size.1),
         ),
         0.0,
@@ -270,7 +258,6 @@ impl eframe::App for TermieGui {
                     label_response.rect,
                     self.character_size.as_ref().unwrap(),
                     &self.terminal_emulator.cursor_pos(),
-                    self.terminal_emulator.data(),
                     ui,
                 );
             });
