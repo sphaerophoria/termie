@@ -53,6 +53,8 @@ pub enum TerminalOutput {
     SetCursorPos { x: Option<usize>, y: Option<usize> },
     ClearForwards,
     ClearAll,
+    CarriageReturn,
+    Newline,
     Sgr(SelectGraphicRendition),
     Data(Vec<u8>),
     Invalid,
@@ -99,6 +101,12 @@ fn parse_param_as_usize(param_bytes: &[u8]) -> Result<Option<usize>, ()> {
     }
     let param = param_str.parse().map_err(|_| ())?;
     Ok(Some(param))
+}
+
+fn push_data_if_non_empty(data: &mut Vec<u8>, output: &mut Vec<TerminalOutput>) {
+    if !data.is_empty() {
+        output.push(TerminalOutput::Data(std::mem::take(data)));
+    }
 }
 
 struct CsiParser {
@@ -186,16 +194,21 @@ impl AnsiParser {
                     }
 
                     if *b == b'\r' {
-                        // Currently carriage returns are not handled properly, so we swallow them
+                        push_data_if_non_empty(&mut data_output, &mut output);
+                        output.push(TerminalOutput::CarriageReturn);
+                        continue;
+                    }
+
+                    if *b == b'\n' {
+                        push_data_if_non_empty(&mut data_output, &mut output);
+                        output.push(TerminalOutput::Newline);
                         continue;
                     }
 
                     data_output.push(*b);
                 }
                 AnsiParserInner::Escape => {
-                    if !data_output.is_empty() {
-                        output.push(TerminalOutput::Data(std::mem::take(&mut data_output)));
-                    }
+                    push_data_if_non_empty(&mut data_output, &mut output);
 
                     match b {
                         b'[' => {

@@ -426,6 +426,25 @@ impl TerminalBuffer {
         self.buf.clear();
     }
 
+    fn append_newline_at_line_end(&mut self, pos: &CursorPos) {
+        let line_ranges = calc_line_ranges(&self.buf, self.width);
+        let Some(line_range) = line_ranges.get(pos.y) else {
+            return;
+        };
+
+        let newline_pos = self
+            .buf
+            .iter()
+            .enumerate()
+            .skip(line_range.start)
+            .find(|(_i, b)| **b == b'\n')
+            .map(|(i, _b)| i);
+
+        if newline_pos.is_none() {
+            self.buf.push(b'\n');
+        }
+    }
+
     fn data(&self) -> &[u8] {
         &self.buf
     }
@@ -510,6 +529,14 @@ impl TerminalEmulator {
                         self.format_tracker
                             .push_range(&self.cursor_state, 0..usize::MAX);
                         self.terminal_buffer.clear_all();
+                    }
+                    TerminalOutput::CarriageReturn => {
+                        self.cursor_state.pos.x = 0;
+                    }
+                    TerminalOutput::Newline => {
+                        self.terminal_buffer
+                            .append_newline_at_line_end(&self.cursor_state.pos);
+                        self.cursor_state.pos.y += 1;
                     }
                     TerminalOutput::Sgr(sgr) => {
                         // Should this be one big match ???????
@@ -800,5 +827,39 @@ mod test {
 
         buffer.insert_data(&CursorPos { x: 3, y: 2 }, b"hello world");
         assert_eq!(buffer.data(), b"\n\n   hello world\n\n\n    hello world\n");
+    }
+
+    #[test]
+    fn test_canvas_newline_append() {
+        let mut canvas = TerminalBuffer::new(10);
+        let mut cursor_pos = CursorPos { x: 0, y: 0 };
+        canvas.insert_data(&cursor_pos, b"asdf\n1234\nzxyw");
+
+        cursor_pos.x = 2;
+        cursor_pos.y = 1;
+        canvas.append_newline_at_line_end(&cursor_pos);
+        assert_eq!(canvas.buf, b"asdf\n1234\nzxyw\n");
+
+        canvas.clear_forwards(&cursor_pos);
+        assert_eq!(canvas.buf, b"asdf\n12");
+
+        cursor_pos.x = 0;
+        cursor_pos.y = 1;
+        canvas.append_newline_at_line_end(&cursor_pos);
+        assert_eq!(canvas.buf, b"asdf\n12\n");
+
+        cursor_pos.x = 0;
+        cursor_pos.y = 2;
+        canvas.insert_data(&cursor_pos, b"01234567890123456");
+
+        cursor_pos.x = 4;
+        cursor_pos.y = 3;
+        canvas.clear_forwards(&cursor_pos);
+        assert_eq!(canvas.buf, b"asdf\n12\n01234567890123");
+
+        cursor_pos.x = 4;
+        cursor_pos.y = 2;
+        canvas.append_newline_at_line_end(&cursor_pos);
+        assert_eq!(canvas.buf, b"asdf\n12\n01234567890123\n");
     }
 }
