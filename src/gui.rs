@@ -226,19 +226,30 @@ impl eframe::App for TermieGui {
         self.terminal_emulator.read();
 
         CentralPanel::default().show(ctx, |ui| {
-            ui.input(|input_state| {
-                write_input_to_terminal(input_state, &mut self.terminal_emulator);
+            egui::Frame::none().show(ui, |ui| {
+                ui.set_width(
+                    (crate::terminal_emulator::TERMINAL_WIDTH as f32 + 0.5)
+                        * self.character_size.as_ref().unwrap().0,
+                );
+                ui.set_height(
+                    (crate::terminal_emulator::TERMINAL_HEIGHT as f32 + 0.5)
+                        * self.character_size.as_ref().unwrap().1,
+                );
+
+                ui.input(|input_state| {
+                    write_input_to_terminal(input_state, &mut self.terminal_emulator);
+                });
+
+                let response = render_terminal_output(ui, &self.terminal_emulator);
+
+                paint_cursor(
+                    response.rect,
+                    self.character_size.as_ref().unwrap(),
+                    &self.terminal_emulator.cursor_pos(),
+                    self.terminal_emulator.data(),
+                    ui,
+                );
             });
-
-            let response = render_terminal_output(ui, &self.terminal_emulator);
-
-            paint_cursor(
-                response.rect,
-                self.character_size.as_ref().unwrap(),
-                &self.terminal_emulator.cursor_pos(),
-                self.terminal_emulator.data(),
-                ui,
-            );
         });
     }
 }

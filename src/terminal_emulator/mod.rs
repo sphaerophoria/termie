@@ -1,4 +1,4 @@
-use nix::{errno::Errno, unistd::ForkResult};
+use nix::{errno::Errno, ioctl_write_ptr_bad, unistd::ForkResult};
 use tempfile::TempDir;
 use thiserror::Error;
 
@@ -450,6 +450,8 @@ impl TerminalBuffer {
     }
 }
 
+ioctl_write_ptr_bad!(set_window_size, nix::libc::TIOCSWINSZ, nix::pty::Winsize);
+
 pub struct TerminalEmulator {
     parser: AnsiParser,
     terminal_buffer: TerminalBuffer,
@@ -459,11 +461,25 @@ pub struct TerminalEmulator {
     _terminfo_dir: TempDir,
 }
 
+pub const TERMINAL_WIDTH: u16 = 50;
+pub const TERMINAL_HEIGHT: u16 = 16;
+
 impl TerminalEmulator {
     pub fn new() -> TerminalEmulator {
         let terminfo_dir = extract_terminfo().unwrap();
         let fd = spawn_shell(terminfo_dir.path());
         set_nonblock(&fd);
+
+        let win_size = nix::pty::Winsize {
+            ws_row: TERMINAL_HEIGHT,
+            ws_col: TERMINAL_WIDTH,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+
+        unsafe {
+            set_window_size(fd.as_raw_fd(), &win_size).unwrap();
+        }
 
         TerminalEmulator {
             parser: AnsiParser::new(),

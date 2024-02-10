@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 eframe = "0.25.0"
 tar = "0.4.40"
-nix = { version = "0.27.1", default-features = false, features = ["term", "process", "fs"] }
+nix = { version = "0.27.1", default-features = false, features = ["term", "process", "fs", "ioctl"] }
 tempfile = "3.10.0"
 thiserror = "1.0.56"
 
