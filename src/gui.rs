@@ -196,9 +196,29 @@ fn render_terminal_output(
     ui.label(job)
 }
 
+struct DebugRenderer {
+    enable: bool,
+}
+
+impl DebugRenderer {
+    fn new() -> DebugRenderer {
+        DebugRenderer { enable: false }
+    }
+
+    fn render(&self, ui: &mut Ui, rect: Rect, color: Color32) {
+        if !self.enable {
+            return;
+        }
+
+        let color = color.gamma_multiply(0.25);
+        ui.painter().rect_filled(rect, 0.0, color);
+    }
+}
+
 struct TermieGui {
     terminal_emulator: TerminalEmulator,
     character_size: Option<(f32, f32)>,
+    debug_renderer: DebugRenderer,
 }
 
 impl TermieGui {
@@ -213,6 +233,7 @@ impl TermieGui {
         TermieGui {
             terminal_emulator,
             character_size: None,
+            debug_renderer: DebugRenderer::new(),
         }
     }
 }
@@ -225,8 +246,8 @@ impl eframe::App for TermieGui {
 
         self.terminal_emulator.read();
 
-        CentralPanel::default().show(ctx, |ui| {
-            egui::Frame::none().show(ui, |ui| {
+        let panel_response = CentralPanel::default().show(ctx, |ui| {
+            let frame_response = egui::Frame::none().show(ui, |ui| {
                 ui.set_width(
                     (crate::terminal_emulator::TERMINAL_WIDTH as f32 + 0.5)
                         * self.character_size.as_ref().unwrap().0,
@@ -240,16 +261,24 @@ impl eframe::App for TermieGui {
                     write_input_to_terminal(input_state, &mut self.terminal_emulator);
                 });
 
-                let response = render_terminal_output(ui, &self.terminal_emulator);
+                let label_response = render_terminal_output(ui, &self.terminal_emulator);
+                self.debug_renderer
+                    .render(ui, label_response.rect, Color32::BLUE);
 
                 paint_cursor(
-                    response.rect,
+                    label_response.rect,
                     self.character_size.as_ref().unwrap(),
                     &self.terminal_emulator.cursor_pos(),
                     self.terminal_emulator.data(),
                     ui,
                 );
             });
+            self.debug_renderer
+                .render(ui, frame_response.response.rect, Color32::RED);
+        });
+
+        panel_response.response.context_menu(|ui| {
+            ui.checkbox(&mut self.debug_renderer.enable, "Debug render");
         });
     }
 }
