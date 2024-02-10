@@ -151,7 +151,7 @@ fn create_terminal_output_layout_job(
 ) -> (LayoutJob, TextFormat) {
     let text_style = &style.text_styles[&TextStyle::Monospace];
     let mut job = egui::text::LayoutJob::simple(
-        unsafe { std::str::from_utf8_unchecked(data).to_string() },
+        std::str::from_utf8(data).unwrap().to_string(),
         text_style.clone(),
         style.visuals.text_color(),
         width,
