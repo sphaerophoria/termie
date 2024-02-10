@@ -179,7 +179,39 @@ fn adjust_existing_format_ranges(existing: &mut Vec<FormatTag>, range: &Range<us
     existing.extend(to_push);
 }
 
-#[derive(Clone)]
+fn split_format_data_for_scrollback(
+    tags: Vec<FormatTag>,
+    scrollback_split: usize,
+) -> TerminalData<Vec<FormatTag>> {
+    let scrollback_tags = tags
+        .iter()
+        .filter(|tag| tag.start < scrollback_split)
+        .cloned()
+        .map(|mut tag| {
+            tag.end = tag.end.min(scrollback_split);
+            tag
+        })
+        .collect();
+
+    let canvas_tags = tags
+        .into_iter()
+        .filter(|tag| tag.end > scrollback_split)
+        .map(|mut tag| {
+            tag.start = tag.start.saturating_sub(scrollback_split);
+            if tag.end != usize::MAX {
+                tag.end -= scrollback_split;
+            }
+            tag
+        })
+        .collect();
+
+    TerminalData {
+        scrollback: scrollback_tags,
+        visible: canvas_tags,
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct CursorPos {
     pub x: usize,
     pub y: usize,
@@ -319,13 +351,15 @@ fn calc_line_ranges(buf: &[u8], width: usize) -> Vec<Range<usize>> {
     ret
 }
 
-fn buf_to_cursor_pos(buf: &[u8], width: usize, buf_pos: usize) -> CursorPos {
+fn buf_to_cursor_pos(buf: &[u8], width: usize, height: usize, buf_pos: usize) -> CursorPos {
     let new_line_ranges = calc_line_ranges(buf, width);
-    let (new_cursor_y, new_cursor_line) = new_line_ranges
+    let new_visible_line_ranges = line_ranges_to_visible_line_ranges(&new_line_ranges, height);
+    let (new_cursor_y, new_cursor_line) = new_visible_line_ranges
         .iter()
         .enumerate()
         .find(|(_i, r)| r.end >= buf_pos)
         .unwrap();
+
     let new_cursor_x = buf_pos - new_cursor_line.start;
     CursorPos {
         x: new_cursor_x,
@@ -344,21 +378,40 @@ fn unwrapped_line_end_pos(buf: &[u8], start_pos: usize) -> usize {
         .unwrap_or(buf.len())
 }
 
+/// Given terminal height `height`, extract the visible line ranges from all line ranges (which
+/// include scrollback) assuming "visible" is the bottom N lines
+fn line_ranges_to_visible_line_ranges(
+    line_ranges: &[Range<usize>],
+    height: usize,
+) -> &[Range<usize>] {
+    if line_ranges.is_empty() {
+        return line_ranges;
+    }
+    let last_line_idx = line_ranges.len();
+    let first_visible_line = last_line_idx.saturating_sub(height);
+    &line_ranges[first_visible_line..]
+}
+
 fn pad_buffer_for_write(
     buf: &mut Vec<u8>,
     width: usize,
+    height: usize,
     cursor_pos: &CursorPos,
     write_len: usize,
 ) -> usize {
-    let mut line_ranges = calc_line_ranges(buf, width);
+    let mut visible_line_ranges = {
+        // Calculate in block scope to avoid accidental usage of scrollback line ranges later
+        let line_ranges = calc_line_ranges(buf, width);
+        line_ranges_to_visible_line_ranges(&line_ranges, height).to_vec()
+    };
 
-    for _ in line_ranges.len()..cursor_pos.y + 1 {
+    for _ in visible_line_ranges.len()..cursor_pos.y + 1 {
         buf.push(b'\n');
         let newline_pos = buf.len() - 1;
-        line_ranges.push(newline_pos..newline_pos);
+        visible_line_ranges.push(newline_pos..newline_pos);
     }
 
-    let line_range = &line_ranges[cursor_pos.y];
+    let line_range = &visible_line_ranges[cursor_pos.y];
 
     let desired_start = line_range.start + cursor_pos.x;
     let desired_end = desired_start + write_len;
@@ -382,6 +435,11 @@ fn pad_buffer_for_write(
     desired_start
 }
 
+pub struct TerminalData<T> {
+    pub scrollback: T,
+    pub visible: T,
+}
+
 struct TerminalBufferInsertResponse {
     written_range: Range<usize>,
     new_cursor_pos: CursorPos,
@@ -390,18 +448,29 @@ struct TerminalBufferInsertResponse {
 struct TerminalBuffer {
     buf: Vec<u8>,
     width: usize,
+    height: usize,
 }
 
 impl TerminalBuffer {
-    fn new(width: usize) -> TerminalBuffer {
-        TerminalBuffer { buf: vec![], width }
+    fn new(width: usize, height: usize) -> TerminalBuffer {
+        TerminalBuffer {
+            buf: vec![],
+            width,
+            height,
+        }
     }
 
     fn insert_data(&mut self, cursor_pos: &CursorPos, data: &[u8]) -> TerminalBufferInsertResponse {
-        let write_idx = pad_buffer_for_write(&mut self.buf, self.width, cursor_pos, data.len());
+        let write_idx = pad_buffer_for_write(
+            &mut self.buf,
+            self.width,
+            self.height,
+            cursor_pos,
+            data.len(),
+        );
         let write_range = write_idx..write_idx + data.len();
         self.buf[write_range.clone()].copy_from_slice(data);
-        let new_cursor_pos = buf_to_cursor_pos(&self.buf, self.width, write_range.end);
+        let new_cursor_pos = buf_to_cursor_pos(&self.buf, self.width, self.height, write_range.end);
         TerminalBufferInsertResponse {
             written_range: write_range,
             new_cursor_pos,
@@ -445,8 +514,20 @@ impl TerminalBuffer {
         }
     }
 
-    fn data(&self) -> &[u8] {
-        &self.buf
+    fn data(&self) -> TerminalData<&[u8]> {
+        let line_ranges = calc_line_ranges(&self.buf, self.width);
+        let visible_line_ranges = line_ranges_to_visible_line_ranges(&line_ranges, self.height);
+        if self.buf.is_empty() {
+            return TerminalData {
+                scrollback: &[],
+                visible: &self.buf,
+            };
+        }
+        let start = visible_line_ranges[0].start;
+        TerminalData {
+            scrollback: &self.buf[0..start],
+            visible: &self.buf[start..],
+        }
     }
 }
 
@@ -485,7 +566,7 @@ impl TerminalEmulator {
             parser: AnsiParser::new(),
             // FIXME: Should be provided by GUI (or updated)
             // Initial size matches bash default
-            terminal_buffer: TerminalBuffer::new(80),
+            terminal_buffer: TerminalBuffer::new(TERMINAL_WIDTH as usize, TERMINAL_HEIGHT as usize),
             format_tracker: FormatTracker::new(),
             cursor_state: CursorState {
                 pos: CursorPos { x: 0, y: 0 },
@@ -584,12 +665,13 @@ impl TerminalEmulator {
         }
     }
 
-    pub fn data(&self) -> &[u8] {
+    pub fn data(&self) -> TerminalData<&[u8]> {
         self.terminal_buffer.data()
     }
 
-    pub fn format_data(&self) -> Vec<FormatTag> {
-        self.format_tracker.tags()
+    pub fn format_data(&self) -> TerminalData<Vec<FormatTag>> {
+        let offset = self.terminal_buffer.data().scrollback.len();
+        split_format_data_for_scrollback(self.format_tracker.tags(), offset)
     }
 
     pub fn cursor_pos(&self) -> CursorPos {
@@ -783,76 +865,79 @@ mod test {
         let mut buf = b"asdf\n1234\nzxyw".to_vec();
 
         let cursor_pos = CursorPos { x: 8, y: 0 };
-        let copy_idx = pad_buffer_for_write(&mut buf, 10, &cursor_pos, 10);
+        let copy_idx = pad_buffer_for_write(&mut buf, 10, 10, &cursor_pos, 10);
         assert_eq!(buf, b"asdf              \n1234\nzxyw");
         assert_eq!(copy_idx, 8);
     }
 
     #[test]
     fn test_canvas_clear_forwards() {
-        let mut buffer = TerminalBuffer::new(5);
+        let mut buffer = TerminalBuffer::new(5, 5);
         buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"012\n3456789");
         buffer.clear_forwards(&CursorPos { x: 1, y: 1 });
-        assert_eq!(buffer.data(), b"012\n3");
+        assert_eq!(buffer.data().visible, b"012\n3");
     }
 
     #[test]
     fn test_canvas_clear() {
-        let mut buffer = TerminalBuffer::new(5);
+        let mut buffer = TerminalBuffer::new(5, 5);
         buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"0123456789");
         buffer.clear_all();
-        assert_eq!(buffer.data(), &[]);
+        assert_eq!(buffer.data().visible, &[]);
     }
 
     #[test]
     fn test_terminal_buffer_overwrite_early_newline() {
-        let mut buffer = TerminalBuffer::new(5);
+        let mut buffer = TerminalBuffer::new(5, 5);
         buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"012\n3456789");
-        assert_eq!(buffer.data(), b"012\n3456789\n");
+        assert_eq!(buffer.data().visible, b"012\n3456789\n");
 
         // Cursor pos should be calculated based off wrapping at column 5, but should not result in
         // an extra newline
         buffer.insert_data(&CursorPos { x: 2, y: 1 }, b"test");
-        assert_eq!(buffer.data(), b"012\n34test9\n");
+        assert_eq!(buffer.data().visible, b"012\n34test9\n");
     }
 
     #[test]
     fn test_terminal_buffer_overwrite_no_newline() {
-        let mut buffer = TerminalBuffer::new(5);
+        let mut buffer = TerminalBuffer::new(5, 5);
         buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"0123456789");
-        assert_eq!(buffer.data(), b"0123456789\n");
+        assert_eq!(buffer.data().visible, b"0123456789\n");
 
         // Cursor pos should be calculated based off wrapping at column 5, but should not result in
         // an extra newline
         buffer.insert_data(&CursorPos { x: 2, y: 1 }, b"test");
-        assert_eq!(buffer.data(), b"0123456test\n");
+        assert_eq!(buffer.data().visible, b"0123456test\n");
     }
 
     #[test]
     fn test_terminal_buffer_overwrite_late_newline() {
         // This should behave exactly as test_terminal_buffer_overwrite_no_newline(), except with a
         // neline between lines 1 and 2
-        let mut buffer = TerminalBuffer::new(5);
+        let mut buffer = TerminalBuffer::new(5, 5);
         buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"01234\n56789");
-        assert_eq!(buffer.data(), b"01234\n56789\n");
+        assert_eq!(buffer.data().visible, b"01234\n56789\n");
 
         buffer.insert_data(&CursorPos { x: 2, y: 1 }, b"test");
-        assert_eq!(buffer.data(), b"01234\n56test\n");
+        assert_eq!(buffer.data().visible, b"01234\n56test\n");
     }
 
     #[test]
     fn test_terminal_buffer_insert_unallocated_data() {
-        let mut buffer = TerminalBuffer::new(10);
+        let mut buffer = TerminalBuffer::new(10, 10);
         buffer.insert_data(&CursorPos { x: 4, y: 5 }, b"hello world");
-        assert_eq!(buffer.data(), b"\n\n\n\n\n    hello world\n");
+        assert_eq!(buffer.data().visible, b"\n\n\n\n\n    hello world\n");
 
         buffer.insert_data(&CursorPos { x: 3, y: 2 }, b"hello world");
-        assert_eq!(buffer.data(), b"\n\n   hello world\n\n\n    hello world\n");
+        assert_eq!(
+            buffer.data().visible,
+            b"\n\n   hello world\n\n\n    hello world\n"
+        );
     }
 
     #[test]
     fn test_canvas_newline_append() {
-        let mut canvas = TerminalBuffer::new(10);
+        let mut canvas = TerminalBuffer::new(10, 10);
         let mut cursor_pos = CursorPos { x: 0, y: 0 };
         canvas.insert_data(&cursor_pos, b"asdf\n1234\nzxyw");
 
@@ -882,5 +967,120 @@ mod test {
         cursor_pos.y = 2;
         canvas.append_newline_at_line_end(&cursor_pos);
         assert_eq!(canvas.buf, b"asdf\n12\n01234567890123\n");
+    }
+
+    #[test]
+    fn test_canvas_scrolling() {
+        let mut canvas = TerminalBuffer::new(10, 3);
+        let initial_cursor_pos = CursorPos { x: 0, y: 0 };
+
+        fn crlf(pos: &mut CursorPos) {
+            pos.y += 1;
+            pos.x = 0;
+        }
+
+        // Simulate real terminal usage where newlines are injected with cursor moves
+        let mut response = canvas.insert_data(&initial_cursor_pos, b"asdf");
+        crlf(&mut response.new_cursor_pos);
+        let mut response = canvas.insert_data(&response.new_cursor_pos, b"xyzw");
+        crlf(&mut response.new_cursor_pos);
+        let mut response = canvas.insert_data(&response.new_cursor_pos, b"1234");
+        crlf(&mut response.new_cursor_pos);
+        let mut response = canvas.insert_data(&response.new_cursor_pos, b"5678");
+        crlf(&mut response.new_cursor_pos);
+
+        assert_eq!(canvas.data().scrollback, b"asdf\n");
+        assert_eq!(canvas.data().visible, b"xyzw\n1234\n5678\n");
+    }
+
+    #[test]
+    fn test_format_tracker_scrollback_split() {
+        let tags = vec![
+            FormatTag {
+                start: 0,
+                end: 5,
+                color: TerminalColor::Blue,
+                bold: true,
+            },
+            FormatTag {
+                start: 5,
+                end: 7,
+                color: TerminalColor::Red,
+                bold: false,
+            },
+            FormatTag {
+                start: 7,
+                end: 10,
+                color: TerminalColor::Blue,
+                bold: true,
+            },
+            FormatTag {
+                start: 10,
+                end: usize::MAX,
+                color: TerminalColor::Red,
+                bold: true,
+            },
+        ];
+
+        // Case 1: no split
+        let res = split_format_data_for_scrollback(tags.clone(), 0);
+        assert_eq!(res.scrollback, &[]);
+        assert_eq!(res.visible, &tags[..]);
+
+        // Case 2: Split on a boundary
+        let res = split_format_data_for_scrollback(tags.clone(), 10);
+        assert_eq!(res.scrollback, &tags[0..3]);
+        assert_eq!(
+            res.visible,
+            &[FormatTag {
+                start: 0,
+                end: usize::MAX,
+                color: TerminalColor::Red,
+                bold: true,
+            },]
+        );
+
+        // Case 3: Split a segment
+        let res = split_format_data_for_scrollback(tags.clone(), 9);
+        assert_eq!(
+            res.scrollback,
+            &[
+                FormatTag {
+                    start: 0,
+                    end: 5,
+                    color: TerminalColor::Blue,
+                    bold: true,
+                },
+                FormatTag {
+                    start: 5,
+                    end: 7,
+                    color: TerminalColor::Red,
+                    bold: false,
+                },
+                FormatTag {
+                    start: 7,
+                    end: 9,
+                    color: TerminalColor::Blue,
+                    bold: true,
+                },
+            ]
+        );
+        assert_eq!(
+            res.visible,
+            &[
+                FormatTag {
+                    start: 0,
+                    end: 1,
+                    color: TerminalColor::Blue,
+                    bold: true,
+                },
+                FormatTag {
+                    start: 1,
+                    end: usize::MAX,
+                    color: TerminalColor::Red,
+                    bold: true,
+                },
+            ]
+        );
     }
 }
