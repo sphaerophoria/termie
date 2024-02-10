@@ -312,8 +312,10 @@ impl AnsiParser {
                         }
                         CsiParserState::Finished(esc) => {
                             println!(
-                                "Unhandled csi code: {:?} {esc:x}",
-                                std::char::from_u32(esc as u32)
+                                "Unhandled csi code: {:?} {esc:x} {}/{}",
+                                std::char::from_u32(esc as u32),
+                                esc >> 4,
+                                esc & 0xf,
                             );
                             output.push(TerminalOutput::Invalid);
                             self.inner = AnsiParserInner::Empty;
