@@ -1,0 +1,10 @@
+#	Reconstructed via infocmp from file: /run/current-system/sw/share/terminfo/d/dumb
+termie|80-column dumb tty,
+	am,
+	colors#8,
+	cols#80,
+	bel=^G,
+	clear=\E[H\E[J,
+	cr=\r,
+	cud1=\n,
+	ind=\n,
