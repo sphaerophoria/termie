@@ -55,6 +55,7 @@ pub enum TerminalOutput {
     ClearAll,
     CarriageReturn,
     Newline,
+    Backspace,
     Sgr(SelectGraphicRendition),
     Data(Vec<u8>),
     Invalid,
@@ -202,6 +203,12 @@ impl AnsiParser {
                     if *b == b'\n' {
                         push_data_if_non_empty(&mut data_output, &mut output);
                         output.push(TerminalOutput::Newline);
+                        continue;
+                    }
+
+                    if *b == 0x08 {
+                        push_data_if_non_empty(&mut data_output, &mut output);
+                        output.push(TerminalOutput::Backspace);
                         continue;
                     }
 

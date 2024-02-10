@@ -538,6 +538,11 @@ impl TerminalEmulator {
                             .append_newline_at_line_end(&self.cursor_state.pos);
                         self.cursor_state.pos.y += 1;
                     }
+                    TerminalOutput::Backspace => {
+                        if self.cursor_state.pos.x >= 1 {
+                            self.cursor_state.pos.x -= 1;
+                        }
+                    }
                     TerminalOutput::Sgr(sgr) => {
                         // Should this be one big match ???????
                         if let Some(color) = TerminalColor::from_sgr(sgr) {
