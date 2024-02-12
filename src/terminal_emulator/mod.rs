@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use std::{
     ffi::CStr,
+    fmt,
     ops::Range,
     os::fd::{AsRawFd, OwnedFd},
     path::Path,
@@ -12,8 +13,83 @@ use std::{
 use ansi::{AnsiParser, SelectGraphicRendition, TerminalOutput};
 
 mod ansi;
-
 const TERMINFO: &[u8] = include_bytes!(std::concat!(std::env!("OUT_DIR"), "/terminfo.tar"));
+
+#[derive(Eq, PartialEq)]
+enum Mode {
+    // Cursor keys mode
+    // https://vt100.net/docs/vt100-ug/chapter3.html
+    Decckm,
+    Unknown(Vec<u8>),
+}
+
+impl fmt::Debug for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Mode::Decckm => f.write_str("Decckm"),
+            Mode::Unknown(params) => {
+                let params_s = std::str::from_utf8(params)
+                    .expect("parameter parsing should not allow non-utf8 characters here");
+                f.write_fmt(format_args!("Unknown({})", params_s))
+            }
+        }
+    }
+}
+
+fn char_to_ctrl_code(c: u8) -> u8 {
+    // https://catern.com/posts/terminal_quirks.html
+    // man ascii
+    c & 0b0001_1111
+}
+
+#[derive(Eq, PartialEq, Debug)]
+enum TerminalInputPayload {
+    Single(u8),
+    Many(&'static [u8]),
+}
+
+pub enum TerminalInput {
+    // Normal keypress
+    Ascii(u8),
+    // Normal keypress with ctrl
+    Ctrl(u8),
+    Enter,
+    Backspace,
+    ArrowRight,
+    ArrowLeft,
+    ArrowUp,
+    ArrowDown,
+}
+
+impl TerminalInput {
+    fn to_payload(&self, decckm_mode: bool) -> TerminalInputPayload {
+        match self {
+            TerminalInput::Ascii(c) => TerminalInputPayload::Single(*c),
+            TerminalInput::Ctrl(c) => TerminalInputPayload::Single(char_to_ctrl_code(*c)),
+            TerminalInput::Enter => TerminalInputPayload::Single(b'\n'),
+            // Hard to tie back, but check default VERASE in terminfo definition
+            TerminalInput::Backspace => TerminalInputPayload::Single(0x7f),
+            // https://vt100.net/docs/vt100-ug/chapter3.html
+            // Table 3-6
+            TerminalInput::ArrowRight => match decckm_mode {
+                true => TerminalInputPayload::Many(b"\x1bOC"),
+                false => TerminalInputPayload::Many(b"\x1b[C"),
+            },
+            TerminalInput::ArrowLeft => match decckm_mode {
+                true => TerminalInputPayload::Many(b"\x1bOD"),
+                false => TerminalInputPayload::Many(b"\x1b[D"),
+            },
+            TerminalInput::ArrowUp => match decckm_mode {
+                true => TerminalInputPayload::Many(b"\x1bOA"),
+                false => TerminalInputPayload::Many(b"\x1b[A"),
+            },
+            TerminalInput::ArrowDown => match decckm_mode {
+                true => TerminalInputPayload::Many(b"\x1bOB"),
+                false => TerminalInputPayload::Many(b"\x1b[B"),
+            },
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 enum ExtractTerminfoError {
@@ -538,6 +614,7 @@ pub struct TerminalEmulator {
     terminal_buffer: TerminalBuffer,
     format_tracker: FormatTracker,
     cursor_state: CursorState,
+    decckm_mode: bool,
     fd: OwnedFd,
     _terminfo_dir: TempDir,
 }
@@ -568,6 +645,7 @@ impl TerminalEmulator {
             // Initial size matches bash default
             terminal_buffer: TerminalBuffer::new(TERMINAL_WIDTH as usize, TERMINAL_HEIGHT as usize),
             format_tracker: FormatTracker::new(),
+            decckm_mode: false,
             cursor_state: CursorState {
                 pos: CursorPos { x: 0, y: 0 },
                 bold: false,
@@ -578,11 +656,21 @@ impl TerminalEmulator {
         }
     }
 
-    pub fn write(&mut self, mut to_write: &[u8]) {
-        while !to_write.is_empty() {
-            let written = nix::unistd::write(self.fd.as_raw_fd(), to_write).unwrap();
-            to_write = &to_write[written..];
-        }
+    pub fn write(&mut self, to_write: TerminalInput) {
+        match to_write.to_payload(self.decckm_mode) {
+            TerminalInputPayload::Single(c) => {
+                let mut written = 0;
+                while written == 0 {
+                    written = nix::unistd::write(self.fd.as_raw_fd(), &[c]).unwrap();
+                }
+            }
+            TerminalInputPayload::Many(mut to_write) => {
+                while !to_write.is_empty() {
+                    let written = nix::unistd::write(self.fd.as_raw_fd(), to_write).unwrap();
+                    to_write = &to_write[written..];
+                }
+            }
+        };
     }
 
     pub fn read(&mut self) {
@@ -653,6 +741,22 @@ impl TerminalEmulator {
                             println!("Unhandled sgr: {:?}", sgr);
                         }
                     }
+                    TerminalOutput::SetMode(mode) => match mode {
+                        Mode::Decckm => {
+                            self.decckm_mode = true;
+                        }
+                        _ => {
+                            println!("unhandled set mode: {mode:?}");
+                        }
+                    },
+                    TerminalOutput::ResetMode(mode) => match mode {
+                        Mode::Decckm => {
+                            self.decckm_mode = false;
+                        }
+                        _ => {
+                            println!("unhandled set mode: {mode:?}");
+                        }
+                    },
                     TerminalOutput::Invalid => {}
                 }
             }

@@ -1,3 +1,5 @@
+use super::Mode;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectGraphicRendition {
     // NOTE: Non-exhaustive list
@@ -58,6 +60,8 @@ pub enum TerminalOutput {
     Backspace,
     Sgr(SelectGraphicRendition),
     Data(Vec<u8>),
+    SetMode(Mode),
+    ResetMode(Mode),
     Invalid,
 }
 
@@ -107,6 +111,14 @@ fn parse_param_as_usize(param_bytes: &[u8]) -> Result<Option<usize>, ()> {
 fn push_data_if_non_empty(data: &mut Vec<u8>, output: &mut Vec<TerminalOutput>) {
     if !data.is_empty() {
         output.push(TerminalOutput::Data(std::mem::take(data)));
+    }
+}
+
+fn mode_from_params(params: &[u8]) -> Mode {
+    match params {
+        // https://vt100.net/docs/vt510-rm/DECCKM.html
+        b"?1" => Mode::Decckm,
+        _ => Mode::Unknown(params.to_vec()),
     }
 }
 
@@ -308,6 +320,15 @@ impl AnsiParser {
                                 ));
                             }
 
+                            self.inner = AnsiParserInner::Empty;
+                        }
+                        CsiParserState::Finished(b'h') => {
+                            output.push(TerminalOutput::SetMode(mode_from_params(&parser.params)));
+                            self.inner = AnsiParserInner::Empty;
+                        }
+                        CsiParserState::Finished(b'l') => {
+                            output
+                                .push(TerminalOutput::ResetMode(mode_from_params(&parser.params)));
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(esc) => {
@@ -553,5 +574,31 @@ mod test {
                 TerminalOutput::Data(b"a".into()),
             ]
         );
+    }
+
+    #[test]
+    fn test_mode_parsing() {
+        let mut output_buffer = AnsiParser::new();
+        let output = output_buffer.push(b"\x1b[1h");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetMode(Mode::Unknown(b"1".to_vec()))
+        );
+
+        let output = output_buffer.push(b"\x1b[1l");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::ResetMode(Mode::Unknown(b"1".to_vec()))
+        );
+
+        let output = output_buffer.push(b"\x1b[?1l");
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0], TerminalOutput::ResetMode(Mode::Decckm));
+
+        let output = output_buffer.push(b"\x1b[?1h");
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0], TerminalOutput::SetMode(Mode::Decckm));
     }
 }

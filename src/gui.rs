@@ -1,37 +1,34 @@
-use crate::terminal_emulator::{CursorPos, FormatTag, TerminalColor, TerminalEmulator};
+use crate::terminal_emulator::{
+    CursorPos, FormatTag, TerminalColor, TerminalEmulator, TerminalInput,
+};
 use eframe::egui::{
     self, text::LayoutJob, CentralPanel, Color32, Event, FontData, FontDefinitions, FontFamily,
     InputState, Key, Modifiers, Rect, TextFormat, TextStyle, Ui,
 };
-use std::borrow::Cow;
 
 const REGULAR_FONT_NAME: &str = "hack";
 const BOLD_FONT_NAME: &str = "hack-bold";
 
-fn char_to_ctrl_code(c: u8) -> u8 {
-    // https://catern.com/posts/terminal_quirks.html
-    // man ascii
-    c & 0b0001_1111
-}
-
 fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalEmulator) {
     for event in &input.raw.events {
-        let text: Cow<str> = match event {
-            Event::Text(text) => text.into(),
+        match event {
+            Event::Text(text) => {
+                for c in text.as_bytes() {
+                    terminal_emulator.write(TerminalInput::Ascii(*c));
+                }
+            }
             Event::Key {
                 key: Key::Enter,
                 pressed: true,
                 ..
-            } => "\n".into(),
+            } => {
+                terminal_emulator.write(TerminalInput::Enter);
+            }
             // https://github.com/emilk/egui/issues/3653
             Event::Copy => {
                 // NOTE: Technically not correct if we were on a mac, but also we are using linux
                 // syscalls so we'd have to solve that before this is a problem
-                let ctrl_code = char_to_ctrl_code(b'c');
-                std::str::from_utf8(&[ctrl_code])
-                    .unwrap()
-                    .to_string()
-                    .into()
+                terminal_emulator.write(TerminalInput::Ctrl(b'c'));
             }
             Event::Key {
                 key,
@@ -43,31 +40,15 @@ fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalE
                     let name = key.name();
                     assert!(name.len() == 1);
                     let name_c = name.as_bytes()[0];
-                    let ctrl_code = char_to_ctrl_code(name_c);
-                    std::str::from_utf8(&[ctrl_code])
-                        .unwrap()
-                        .to_string()
-                        .into()
+                    terminal_emulator.write(TerminalInput::Ctrl(name_c));
                 } else if *key == Key::OpenBracket {
-                    let ctrl_code = char_to_ctrl_code(b'[');
-                    std::str::from_utf8(&[ctrl_code])
-                        .unwrap()
-                        .to_string()
-                        .into()
+                    terminal_emulator.write(TerminalInput::Ctrl(b'['));
                 } else if *key == Key::CloseBracket {
-                    let ctrl_code = char_to_ctrl_code(b']');
-                    std::str::from_utf8(&[ctrl_code])
-                        .unwrap()
-                        .to_string()
-                        .into()
+                    terminal_emulator.write(TerminalInput::Ctrl(b']'));
                 } else if *key == Key::Backslash {
-                    let ctrl_code = char_to_ctrl_code(b'\\');
-                    std::str::from_utf8(&[ctrl_code])
-                        .unwrap()
-                        .to_string()
-                        .into()
+                    terminal_emulator.write(TerminalInput::Ctrl(b'\\'));
                 } else {
-                    "".into()
+                    println!("Unexpected ctrl key: {}", key.name());
                 }
             }
             Event::Key {
@@ -75,13 +56,38 @@ fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalE
                 pressed: true,
                 ..
             } => {
-                // Hard to tie back, but check default VERASE in terminfo definition
-                std::str::from_utf8(&[0x7f]).unwrap().into()
+                terminal_emulator.write(TerminalInput::Backspace);
             }
-            _ => "".into(),
+            Event::Key {
+                key: Key::ArrowUp,
+                pressed: true,
+                ..
+            } => {
+                terminal_emulator.write(TerminalInput::ArrowUp);
+            }
+            Event::Key {
+                key: Key::ArrowDown,
+                pressed: true,
+                ..
+            } => {
+                terminal_emulator.write(TerminalInput::ArrowDown);
+            }
+            Event::Key {
+                key: Key::ArrowLeft,
+                pressed: true,
+                ..
+            } => {
+                terminal_emulator.write(TerminalInput::ArrowLeft);
+            }
+            Event::Key {
+                key: Key::ArrowRight,
+                pressed: true,
+                ..
+            } => {
+                terminal_emulator.write(TerminalInput::ArrowRight);
+            }
+            _ => (),
         };
-
-        terminal_emulator.write(text.as_bytes());
     }
 }
 
