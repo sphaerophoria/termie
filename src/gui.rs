@@ -1,22 +1,76 @@
 use crate::terminal_emulator::{CursorPos, FormatTag, TerminalColor, TerminalEmulator};
 use eframe::egui::{
     self, text::LayoutJob, CentralPanel, Color32, Event, FontData, FontDefinitions, FontFamily,
-    InputState, Key, Rect, TextFormat, TextStyle, Ui,
+    InputState, Key, Modifiers, Rect, TextFormat, TextStyle, Ui,
 };
+use std::borrow::Cow;
 
 const REGULAR_FONT_NAME: &str = "hack";
 const BOLD_FONT_NAME: &str = "hack-bold";
 
+fn char_to_ctrl_code(c: u8) -> u8 {
+    // https://catern.com/posts/terminal_quirks.html
+    // man ascii
+    c & 0b0001_1111
+}
+
 fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalEmulator) {
-    for event in &input.events {
-        let text = match event {
-            Event::Text(text) => text,
+    for event in &input.raw.events {
+        let text: Cow<str> = match event {
+            Event::Text(text) => text.into(),
             Event::Key {
                 key: Key::Enter,
                 pressed: true,
                 ..
-            } => "\n",
-            _ => "",
+            } => "\n".into(),
+            // https://github.com/emilk/egui/issues/3653
+            Event::Copy => {
+                // NOTE: Technically not correct if we were on a mac, but also we are using linux
+                // syscalls so we'd have to solve that before this is a problem
+                let ctrl_code = char_to_ctrl_code(b'c');
+                std::str::from_utf8(&[ctrl_code])
+                    .unwrap()
+                    .to_string()
+                    .into()
+            }
+            Event::Key {
+                key,
+                pressed: true,
+                modifiers: Modifiers { ctrl: true, .. },
+                ..
+            } => {
+                if *key >= Key::A && *key <= Key::Z {
+                    let name = key.name();
+                    assert!(name.len() == 1);
+                    let name_c = name.as_bytes()[0];
+                    let ctrl_code = char_to_ctrl_code(name_c);
+                    std::str::from_utf8(&[ctrl_code])
+                        .unwrap()
+                        .to_string()
+                        .into()
+                } else if *key == Key::OpenBracket {
+                    let ctrl_code = char_to_ctrl_code(b'[');
+                    std::str::from_utf8(&[ctrl_code])
+                        .unwrap()
+                        .to_string()
+                        .into()
+                } else if *key == Key::CloseBracket {
+                    let ctrl_code = char_to_ctrl_code(b']');
+                    std::str::from_utf8(&[ctrl_code])
+                        .unwrap()
+                        .to_string()
+                        .into()
+                } else if *key == Key::Backslash {
+                    let ctrl_code = char_to_ctrl_code(b'\\');
+                    std::str::from_utf8(&[ctrl_code])
+                        .unwrap()
+                        .to_string()
+                        .into()
+                } else {
+                    "".into()
+                }
+            }
+            _ => "".into(),
         };
 
         terminal_emulator.write(text.as_bytes());
