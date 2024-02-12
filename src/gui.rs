@@ -70,6 +70,14 @@ fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalE
                     "".into()
                 }
             }
+            Event::Key {
+                key: Key::Backspace,
+                pressed: true,
+                ..
+            } => {
+                // Hard to tie back, but check default VERASE in terminfo definition
+                std::str::from_utf8(&[0x7f]).unwrap().into()
+            }
             _ => "".into(),
         };
 
