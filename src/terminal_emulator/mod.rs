@@ -294,6 +294,26 @@ impl TerminalEmulator {
         }
     }
 
+    pub fn set_win_size(&mut self, width_chars: usize, height_chars: usize) {
+        let response =
+            self.terminal_buffer
+                .set_win_size(width_chars, height_chars, &self.cursor_state.pos);
+        self.cursor_state.pos = response.new_cursor_pos;
+
+        if response.changed {
+            let win_size = nix::pty::Winsize {
+                ws_row: height_chars as u16,
+                ws_col: width_chars as u16,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+
+            unsafe {
+                set_window_size(self.fd.as_raw_fd(), &win_size).unwrap();
+            }
+        }
+    }
+
     pub fn write(&mut self, to_write: TerminalInput) {
         match to_write.to_payload(self.decckm_mode) {
             TerminalInputPayload::Single(c) => {

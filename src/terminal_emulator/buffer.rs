@@ -51,7 +51,13 @@ fn buf_to_cursor_pos(buf: &[u8], width: usize, height: usize, buf_pos: usize) ->
         .find(|(_i, r)| r.end >= buf_pos)
         .unwrap();
 
-    let new_cursor_x = buf_pos - new_cursor_line.start;
+    let new_cursor_x = if buf_pos < new_cursor_line.start {
+        info!("Old cursor position no longer on screen");
+        0
+    } else {
+        buf_pos - new_cursor_line.start
+    };
+
     CursorPos {
         x: new_cursor_x,
         y: new_cursor_y,
@@ -147,6 +153,11 @@ fn cursor_to_buf_pos(
 
 pub struct TerminalBufferInsertResponse {
     pub written_range: Range<usize>,
+    pub new_cursor_pos: CursorPos,
+}
+
+pub struct TerminalBufferSetWinSizeResponse {
+    pub changed: bool,
     pub new_cursor_pos: CursorPos,
 }
 
@@ -315,6 +326,35 @@ impl TerminalBuffer {
         TerminalData {
             scrollback: &self.buf[0..start],
             visible: &self.buf[start..],
+        }
+    }
+
+    pub fn set_win_size(
+        &mut self,
+        width: usize,
+        height: usize,
+        cursor_pos: &CursorPos,
+    ) -> TerminalBufferSetWinSizeResponse {
+        let changed = self.width != width || self.height != height;
+        if !changed {
+            return TerminalBufferSetWinSizeResponse {
+                changed: false,
+                new_cursor_pos: cursor_pos.clone(),
+            };
+        }
+
+        // Ensure that the cursor position has a valid buffer position. That way when we resize we
+        // can just look up where the cursor is supposed to be and map it back to it's new cursor
+        // position
+        let buf_pos = pad_buffer_for_write(&mut self.buf, self.width, self.height, cursor_pos, 0);
+        let new_cursor_pos = buf_to_cursor_pos(&self.buf, width, height, buf_pos);
+
+        self.width = width;
+        self.height = height;
+
+        TerminalBufferSetWinSizeResponse {
+            changed,
+            new_cursor_pos,
         }
     }
 }
@@ -541,5 +581,34 @@ mod test {
         let response = canvas.clear_line_forwards(&CursorPos { x: 2, y: 1 });
         assert_eq!(response, Some(5..13));
         assert_eq!(canvas.data().visible, b"as\n1212345\n");
+    }
+
+    #[test]
+    fn test_resize_expand() {
+        // Ensure that on window size increase, text stays in same spot relative to cursor position
+        // This was problematic with our initial implementation. It's less of a problem after some
+        // later improvements, but we can keep the test to make sure it still seems sane
+        let mut canvas = TerminalBuffer::new(10, 6);
+
+        let cursor_pos = CursorPos { x: 0, y: 0 };
+
+        fn simulate_resize(
+            canvas: &mut TerminalBuffer,
+            width: usize,
+            height: usize,
+            cursor_pos: &CursorPos,
+        ) -> TerminalBufferInsertResponse {
+            let mut response = canvas.set_win_size(width, height, cursor_pos);
+            response.new_cursor_pos.x = 0;
+            let mut response = canvas.insert_data(&response.new_cursor_pos, &vec![b' '; width]);
+            response.new_cursor_pos.x = 0;
+            let response = canvas.insert_data(&response.new_cursor_pos, b"$ ");
+            response
+        }
+        let response = simulate_resize(&mut canvas, 10, 5, &cursor_pos);
+        let response = simulate_resize(&mut canvas, 10, 4, &response.new_cursor_pos);
+        let response = simulate_resize(&mut canvas, 10, 3, &response.new_cursor_pos);
+        simulate_resize(&mut canvas, 10, 5, &response.new_cursor_pos);
+        assert_eq!(canvas.data().visible, b"$         \n");
     }
 }

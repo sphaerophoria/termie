@@ -355,14 +355,15 @@ impl eframe::App for TermieGui {
 
         let panel_response = CentralPanel::default().show(ctx, |ui| {
             let frame_response = egui::Frame::none().show(ui, |ui| {
-                ui.set_width(
-                    (crate::terminal_emulator::TERMINAL_WIDTH as f32 + 0.5)
-                        * self.character_size.as_ref().unwrap().0,
-                );
-                ui.set_height(
-                    (crate::terminal_emulator::TERMINAL_HEIGHT as f32 + 0.5)
-                        * self.character_size.as_ref().unwrap().1,
-                );
+                let character_size = self.character_size.as_ref().unwrap();
+                let width_chars = (ui.available_width() / character_size.0).floor();
+                let height_chars = (ui.available_height() / character_size.1).floor();
+
+                self.terminal_emulator
+                    .set_win_size(width_chars as usize, height_chars as usize);
+
+                ui.set_width(width_chars * character_size.0);
+                ui.set_height(height_chars * character_size.1);
 
                 ui.input(|input_state| {
                     write_input_to_terminal(input_state, &mut self.terminal_emulator);
