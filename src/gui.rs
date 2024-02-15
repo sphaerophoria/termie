@@ -86,6 +86,20 @@ fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalE
             } => {
                 terminal_emulator.write(TerminalInput::ArrowRight);
             }
+            Event::Key {
+                key: Key::Home,
+                pressed: true,
+                ..
+            } => {
+                terminal_emulator.write(TerminalInput::Home);
+            }
+            Event::Key {
+                key: Key::End,
+                pressed: true,
+                ..
+            } => {
+                terminal_emulator.write(TerminalInput::End);
+            }
             _ => (),
         };
     }

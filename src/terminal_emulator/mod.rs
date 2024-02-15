@@ -59,6 +59,8 @@ pub enum TerminalInput {
     ArrowLeft,
     ArrowUp,
     ArrowDown,
+    Home,
+    End,
 }
 
 impl TerminalInput {
@@ -86,6 +88,14 @@ impl TerminalInput {
             TerminalInput::ArrowDown => match decckm_mode {
                 true => TerminalInputPayload::Many(b"\x1bOB"),
                 false => TerminalInputPayload::Many(b"\x1b[B"),
+            },
+            TerminalInput::Home => match decckm_mode {
+                true => TerminalInputPayload::Many(b"\x1bOH"),
+                false => TerminalInputPayload::Many(b"\x1b[H"),
+            },
+            TerminalInput::End => match decckm_mode {
+                true => TerminalInputPayload::Many(b"\x1bOF"),
+                false => TerminalInputPayload::Many(b"\x1b[F"),
             },
         }
     }
