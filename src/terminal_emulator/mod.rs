@@ -778,6 +778,7 @@ impl TerminalEmulator {
             };
 
             let incoming = &buf[0..read_size];
+            debug!("Incoming data: {:?}", std::str::from_utf8(incoming));
             let parsed = self.parser.push(incoming);
             for segment in parsed {
                 match segment {
@@ -841,7 +842,7 @@ impl TerminalEmulator {
                         } else if sgr == SelectGraphicRendition::Bold {
                             self.cursor_state.bold = true;
                         } else {
-                            println!("Unhandled sgr: {:?}", sgr);
+                            warn!("Unhandled sgr: {:?}", sgr);
                         }
                     }
                     TerminalOutput::SetMode(mode) => match mode {
@@ -849,7 +850,7 @@ impl TerminalEmulator {
                             self.decckm_mode = true;
                         }
                         _ => {
-                            println!("unhandled set mode: {mode:?}");
+                            warn!("unhandled set mode: {mode:?}");
                         }
                     },
                     TerminalOutput::ResetMode(mode) => match mode {
@@ -857,7 +858,7 @@ impl TerminalEmulator {
                             self.decckm_mode = false;
                         }
                         _ => {
-                            println!("unhandled set mode: {mode:?}");
+                            warn!("unhandled set mode: {mode:?}");
                         }
                     },
                     TerminalOutput::Invalid => {}
@@ -867,7 +868,7 @@ impl TerminalEmulator {
 
         if let Err(e) = ret {
             if e != Errno::EAGAIN {
-                println!("Failed to read: {e}");
+                error!("Failed to read from child process: {e}");
             }
         }
     }

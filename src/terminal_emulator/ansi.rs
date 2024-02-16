@@ -236,7 +236,7 @@ impl AnsiParser {
                         }
                         _ => {
                             let b_utf8 = std::char::from_u32(*b as u32);
-                            println!("Unhandled escape sequence {b_utf8:?} {b:x}");
+                            warn!("Unhandled escape sequence {b_utf8:?} {b:x}");
                             self.inner = AnsiParserInner::Empty;
                         }
                     }
@@ -249,7 +249,7 @@ impl AnsiParser {
                                 split_params_into_semicolon_delimited_usize(&parser.params);
 
                             let Ok(params) = params else {
-                                println!("Invalid cursor set position sequence");
+                                warn!("Invalid cursor set position sequence");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
                                 continue;
@@ -263,7 +263,7 @@ impl AnsiParser {
                         }
                         CsiParserState::Finished(b'G') => {
                             let Ok(param) = parse_param_as_usize(&parser.params) else {
-                                println!("Invalid cursor set position sequence");
+                                warn!("Invalid cursor set position sequence");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
                                 continue;
@@ -279,7 +279,7 @@ impl AnsiParser {
                         }
                         CsiParserState::Finished(b'J') => {
                             let Ok(param) = parse_param_as_usize(&parser.params) else {
-                                println!("Invalid clear command");
+                                warn!("Invalid clear command");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
                                 continue;
@@ -295,7 +295,7 @@ impl AnsiParser {
                         }
                         CsiParserState::Finished(b'P') => {
                             let Ok(param) = parse_param_as_usize(&parser.params) else {
-                                println!("Invalid del command");
+                                warn!("Invalid del command");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
                                 continue;
@@ -310,7 +310,7 @@ impl AnsiParser {
                                 split_params_into_semicolon_delimited_usize(&parser.params);
 
                             let Ok(mut params) = params else {
-                                println!("Invalid SGR sequence");
+                                warn!("Invalid SGR sequence");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
                                 continue;
@@ -345,7 +345,7 @@ impl AnsiParser {
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(esc) => {
-                            println!(
+                            warn!(
                                 "Unhandled csi code: {:?} {esc:x} {}/{}",
                                 std::char::from_u32(esc as u32),
                                 esc >> 4,
@@ -355,7 +355,7 @@ impl AnsiParser {
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Invalid => {
-                            println!("Invalid CSI sequence");
+                            warn!("Invalid CSI sequence");
                             output.push(TerminalOutput::Invalid);
                             self.inner = AnsiParserInner::Empty;
                         }

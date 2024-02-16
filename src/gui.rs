@@ -48,7 +48,7 @@ fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalE
                 } else if *key == Key::Backslash {
                     terminal_emulator.write(TerminalInput::Ctrl(b'\\'));
                 } else {
-                    println!("Unexpected ctrl key: {}", key.name());
+                    info!("Unexpected ctrl key: {}", key.name());
                 }
             }
             Event::Key {
