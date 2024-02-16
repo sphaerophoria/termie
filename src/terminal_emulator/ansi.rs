@@ -58,6 +58,7 @@ pub enum TerminalOutput {
     CarriageReturn,
     Newline,
     Backspace,
+    Delete(usize),
     Sgr(SelectGraphicRendition),
     Data(Vec<u8>),
     SetMode(Mode),
@@ -290,6 +291,18 @@ impl AnsiParser {
                                 _ => TerminalOutput::Invalid,
                             };
                             output.push(ret);
+                            self.inner = AnsiParserInner::Empty;
+                        }
+                        CsiParserState::Finished(b'P') => {
+                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                                println!("Invalid del command");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            output.push(TerminalOutput::Delete(param.unwrap_or(1)));
+
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'm') => {

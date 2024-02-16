@@ -395,6 +395,49 @@ impl FormatTracker {
     fn tags(&self) -> Vec<FormatTag> {
         self.color_info.clone()
     }
+
+    fn delete_range(&mut self, range: Range<usize>) {
+        let mut to_delete = Vec::new();
+        let del_size = range.end - range.start;
+
+        for (i, info) in &mut self.color_info.iter_mut().enumerate() {
+            let info_range = info.start..info.end;
+            if info.end <= range.start {
+                continue;
+            }
+
+            if ranges_overlap(range.clone(), info_range.clone()) {
+                if range_fully_conatins(&range, &info_range) {
+                    to_delete.push(i);
+                } else if range_starts_overlapping(&range, &info_range) {
+                    if info.end != usize::MAX {
+                        info.end = range.start;
+                    }
+                } else if range_ends_overlapping(&range, &info_range) {
+                    info.start = range.start;
+                    if info.end != usize::MAX {
+                        info.end -= del_size;
+                    }
+                } else if range_fully_conatins(&info_range, &range) {
+                    if info.end != usize::MAX {
+                        info.end -= del_size;
+                    }
+                } else {
+                    panic!("Unhandled overlap");
+                }
+            } else {
+                assert!(!ranges_overlap(range.clone(), info_range.clone()));
+                info.start -= del_size;
+                if info.end != usize::MAX {
+                    info.end -= del_size;
+                }
+            }
+        }
+
+        for i in to_delete.into_iter().rev() {
+            self.color_info.remove(i);
+        }
+    }
 }
 
 /// Calculate the indexes of the start and end of each line in the buffer given an input width.
@@ -521,6 +564,25 @@ fn pad_buffer_for_write(
     desired_start
 }
 
+fn cursor_to_buf_pos(
+    buf: &[u8],
+    cursor_pos: &CursorPos,
+    width: usize,
+    height: usize,
+) -> Option<(usize, Range<usize>)> {
+    let line_ranges = calc_line_ranges(buf, width);
+    let visible_line_ranges = line_ranges_to_visible_line_ranges(&line_ranges, height);
+
+    visible_line_ranges.get(cursor_pos.y).and_then(|range| {
+        let candidate_pos = range.start + cursor_pos.x;
+        if candidate_pos > range.end {
+            None
+        } else {
+            Some((candidate_pos, range.clone()))
+        }
+    })
+}
+
 pub struct TerminalData<T> {
     pub scrollback: T,
     pub visible: T,
@@ -598,6 +660,29 @@ impl TerminalBuffer {
         if newline_pos.is_none() {
             self.buf.push(b'\n');
         }
+    }
+
+    fn delete_forwards(
+        &mut self,
+        cursor_pos: &CursorPos,
+        num_chars: usize,
+    ) -> Option<Range<usize>> {
+        let Some((buf_pos, line_range)) =
+            cursor_to_buf_pos(&self.buf, cursor_pos, self.width, self.height)
+        else {
+            return None;
+        };
+
+        let mut delete_range = buf_pos..buf_pos + num_chars;
+
+        if delete_range.end > line_range.end && self.buf.get(line_range.end) != Some(&b'\n') {
+            self.buf.insert(line_range.end, b'\n');
+        }
+
+        delete_range.end = line_range.end.min(delete_range.end);
+
+        self.buf.drain(delete_range.clone());
+        Some(delete_range)
     }
 
     fn data(&self) -> TerminalData<&[u8]> {
@@ -736,6 +821,14 @@ impl TerminalEmulator {
                     TerminalOutput::Backspace => {
                         if self.cursor_state.pos.x >= 1 {
                             self.cursor_state.pos.x -= 1;
+                        }
+                    }
+                    TerminalOutput::Delete(num_chars) => {
+                        let deleted_buf_range = self
+                            .terminal_buffer
+                            .delete_forwards(&self.cursor_state.pos, num_chars);
+                        if let Some(range) = deleted_buf_range {
+                            self.format_tracker.delete_range(range);
                         }
                     }
                     TerminalOutput::Sgr(sgr) => {
@@ -1194,6 +1287,146 @@ mod test {
                     color: TerminalColor::Red,
                     bold: true,
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_canvas_delete_forwards() {
+        let mut canvas = TerminalBuffer::new(10, 5);
+        canvas.insert_data(&CursorPos { x: 0, y: 0 }, b"asdf\n123456789012345");
+
+        // Test normal deletion
+        let deleted_range = canvas.delete_forwards(&CursorPos { x: 1, y: 0 }, 1);
+
+        assert_eq!(deleted_range, Some(1..2));
+        assert_eq!(canvas.data().visible, b"adf\n123456789012345\n");
+
+        // Test deletion clamped on newline
+        let deleted_range = canvas.delete_forwards(&CursorPos { x: 1, y: 0 }, 10);
+        assert_eq!(deleted_range, Some(1..3));
+        assert_eq!(canvas.data().visible, b"a\n123456789012345\n");
+
+        // Test deletion clamped on wrap
+        let deleted_range = canvas.delete_forwards(&CursorPos { x: 7, y: 1 }, 10);
+        assert_eq!(deleted_range, Some(9..12));
+        assert_eq!(canvas.data().visible, b"a\n1234567\n12345\n");
+
+        // Test deletion in case where nothing is deleted
+        let deleted_range = canvas.delete_forwards(&CursorPos { x: 5, y: 5 }, 10);
+        assert_eq!(deleted_range, None);
+        assert_eq!(canvas.data().visible, b"a\n1234567\n12345\n");
+    }
+
+    #[test]
+    fn test_format_tracker_del_range() {
+        let mut format_tracker = FormatTracker::new();
+        let mut cursor = CursorState {
+            pos: CursorPos { x: 0, y: 0 },
+            color: TerminalColor::Blue,
+            bold: false,
+        };
+        format_tracker.push_range(&cursor, 0..10);
+        cursor.color = TerminalColor::Red;
+        format_tracker.push_range(&cursor, 10..20);
+
+        format_tracker.delete_range(0..2);
+        assert_eq!(
+            format_tracker.tags(),
+            [
+                FormatTag {
+                    start: 0,
+                    end: 8,
+                    color: TerminalColor::Blue,
+                    bold: false
+                },
+                FormatTag {
+                    start: 8,
+                    end: 18,
+                    color: TerminalColor::Red,
+                    bold: false
+                },
+                FormatTag {
+                    start: 18,
+                    end: usize::MAX,
+                    color: TerminalColor::Default,
+                    bold: false
+                }
+            ]
+        );
+
+        format_tracker.delete_range(2..4);
+        assert_eq!(
+            format_tracker.tags(),
+            [
+                FormatTag {
+                    start: 0,
+                    end: 6,
+                    color: TerminalColor::Blue,
+                    bold: false
+                },
+                FormatTag {
+                    start: 6,
+                    end: 16,
+                    color: TerminalColor::Red,
+                    bold: false
+                },
+                FormatTag {
+                    start: 16,
+                    end: usize::MAX,
+                    color: TerminalColor::Default,
+                    bold: false
+                }
+            ]
+        );
+
+        format_tracker.delete_range(4..6);
+        assert_eq!(
+            format_tracker.tags(),
+            [
+                FormatTag {
+                    start: 0,
+                    end: 4,
+                    color: TerminalColor::Blue,
+                    bold: false
+                },
+                FormatTag {
+                    start: 4,
+                    end: 14,
+                    color: TerminalColor::Red,
+                    bold: false
+                },
+                FormatTag {
+                    start: 14,
+                    end: usize::MAX,
+                    color: TerminalColor::Default,
+                    bold: false
+                }
+            ]
+        );
+
+        format_tracker.delete_range(2..7);
+        assert_eq!(
+            format_tracker.tags(),
+            [
+                FormatTag {
+                    start: 0,
+                    end: 2,
+                    color: TerminalColor::Blue,
+                    bold: false
+                },
+                FormatTag {
+                    start: 2,
+                    end: 9,
+                    color: TerminalColor::Red,
+                    bold: false
+                },
+                FormatTag {
+                    start: 9,
+                    end: usize::MAX,
+                    color: TerminalColor::Default,
+                    bold: false
+                }
             ]
         );
     }
