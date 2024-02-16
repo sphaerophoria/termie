@@ -246,6 +246,16 @@ impl TerminalBuffer {
         Some(clear_pos)
     }
 
+    pub fn clear_line_forwards(&mut self, cursor_pos: &CursorPos) -> Option<Range<usize>> {
+        // Can return early if none, we didn't delete anything if there is nothing to delete
+        let (buf_pos, line_range) =
+            cursor_to_buf_pos(&self.buf, cursor_pos, self.width, self.height)?;
+
+        let del_range = buf_pos..line_range.end;
+        self.buf.drain(del_range.clone());
+        Some(del_range)
+    }
+
     pub fn clear_all(&mut self) {
         self.buf.clear();
     }
@@ -510,5 +520,26 @@ mod test {
             canvas.data().visible,
             b"as        \n1234      12345\n\n     \n"
         );
+    }
+
+    #[test]
+    fn test_clear_line_forwards() {
+        let mut canvas = TerminalBuffer::new(10, 5);
+        canvas.insert_data(&CursorPos { x: 0, y: 0 }, b"asdf\n123456789012345");
+
+        // Nothing do delete
+        let response = canvas.clear_line_forwards(&CursorPos { x: 5, y: 5 });
+        assert_eq!(response, None);
+        assert_eq!(canvas.data().visible, b"asdf\n123456789012345\n");
+
+        // Hit a newline
+        let response = canvas.clear_line_forwards(&CursorPos { x: 2, y: 0 });
+        assert_eq!(response, Some(2..4));
+        assert_eq!(canvas.data().visible, b"as\n123456789012345\n");
+
+        // Hit a wrap
+        let response = canvas.clear_line_forwards(&CursorPos { x: 2, y: 1 });
+        assert_eq!(response, Some(5..13));
+        assert_eq!(canvas.data().visible, b"as\n1212345\n");
     }
 }

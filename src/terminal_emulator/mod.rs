@@ -354,6 +354,14 @@ impl TerminalEmulator {
                             .push_range(&self.cursor_state, 0..usize::MAX);
                         self.terminal_buffer.clear_all();
                     }
+                    TerminalOutput::ClearLineForwards => {
+                        if let Some(range) = self
+                            .terminal_buffer
+                            .clear_line_forwards(&self.cursor_state.pos)
+                        {
+                            self.format_tracker.delete_range(range);
+                        }
+                    }
                     TerminalOutput::CarriageReturn => {
                         self.cursor_state.pos.x = 0;
                     }
