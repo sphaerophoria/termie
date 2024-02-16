@@ -196,7 +196,7 @@ fn split_format_data_for_scrollback(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CursorPos {
     pub x: usize,
     pub y: usize,
@@ -396,6 +396,13 @@ impl TerminalEmulator {
                             warn!("unhandled set mode: {mode:?}");
                         }
                     },
+                    TerminalOutput::InsertSpaces(num_spaces) => {
+                        let response = self
+                            .terminal_buffer
+                            .insert_spaces(&self.cursor_state.pos, num_spaces);
+                        self.format_tracker
+                            .push_range(&self.cursor_state, response.written_range);
+                    }
                     TerminalOutput::ResetMode(mode) => match mode {
                         Mode::Decckm => {
                             self.decckm_mode = false;

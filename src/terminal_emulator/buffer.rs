@@ -186,6 +186,52 @@ impl TerminalBuffer {
         }
     }
 
+    /// Inserts data, but will not wrap. If line end is hit, data stops
+    pub fn insert_spaces(
+        &mut self,
+        cursor_pos: &CursorPos,
+        mut num_spaces: usize,
+    ) -> TerminalBufferInsertResponse {
+        num_spaces = self.width.min(num_spaces);
+
+        let buf_pos = cursor_to_buf_pos(&self.buf, cursor_pos, self.width, self.height);
+        match buf_pos {
+            Some((buf_pos, line_range)) => {
+                // Insert spaces until either we hit num_spaces, or the line width is too long
+                let line_len = line_range.end - line_range.start;
+                let num_inserted = (num_spaces).min(self.width - line_len);
+
+                // Overwrite existing with spaces until we hit num_spaces or we hit the line end
+                let num_overwritten = (num_spaces - num_inserted).min(line_range.end - buf_pos);
+
+                // NOTE: We do the overwrite first so we don't have to worry about adjusting
+                // indices for the newly inserted data
+                self.buf[buf_pos..buf_pos + num_overwritten].fill(b' ');
+                self.buf
+                    .splice(buf_pos..buf_pos, std::iter::repeat(b' ').take(num_inserted));
+
+                let used_spaces = num_inserted + num_overwritten;
+                TerminalBufferInsertResponse {
+                    written_range: buf_pos..buf_pos + used_spaces,
+                    new_cursor_pos: cursor_pos.clone(),
+                }
+            }
+            None => {
+                let write_idx = pad_buffer_for_write(
+                    &mut self.buf,
+                    self.width,
+                    self.height,
+                    cursor_pos,
+                    num_spaces,
+                );
+                TerminalBufferInsertResponse {
+                    written_range: write_idx..write_idx + num_spaces,
+                    new_cursor_pos: cursor_pos.clone(),
+                }
+            }
+        }
+    }
+
     pub fn clear_forwards(&mut self, cursor_pos: &CursorPos) -> Option<usize> {
         let line_ranges = calc_line_ranges(&self.buf, self.width);
 
@@ -431,5 +477,38 @@ mod test {
         let deleted_range = canvas.delete_forwards(&CursorPos { x: 5, y: 5 }, 10);
         assert_eq!(deleted_range, None);
         assert_eq!(canvas.data().visible, b"a\n1234567\n12345\n");
+    }
+
+    #[test]
+    fn test_canvas_insert_spaces() {
+        let mut canvas = TerminalBuffer::new(10, 5);
+        canvas.insert_data(&CursorPos { x: 0, y: 0 }, b"asdf\n123456789012345");
+
+        // Happy path
+        let response = canvas.insert_spaces(&CursorPos { x: 2, y: 0 }, 2);
+        assert_eq!(response.written_range, 2..4);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 2, y: 0 });
+        assert_eq!(canvas.data().visible, b"as  df\n123456789012345\n");
+
+        // Truncation at newline
+        let response = canvas.insert_spaces(&CursorPos { x: 2, y: 0 }, 1000);
+        assert_eq!(response.written_range, 2..10);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 2, y: 0 });
+        assert_eq!(canvas.data().visible, b"as        \n123456789012345\n");
+
+        // Truncation at line wrap
+        let response = canvas.insert_spaces(&CursorPos { x: 4, y: 1 }, 1000);
+        assert_eq!(response.written_range, 15..21);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 4, y: 1 });
+        assert_eq!(canvas.data().visible, b"as        \n1234      12345\n");
+
+        // Insertion at non-existant buffer pos
+        let response = canvas.insert_spaces(&CursorPos { x: 2, y: 4 }, 3);
+        assert_eq!(response.written_range, 30..33);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 2, y: 4 });
+        assert_eq!(
+            canvas.data().visible,
+            b"as        \n1234      12345\n\n     \n"
+        );
     }
 }
