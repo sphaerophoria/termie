@@ -10,6 +10,7 @@ fn main() {
     let mut child = Command::new("tic")
         .arg("-o")
         .arg(&terminfo_out_dir)
+        .arg("-x")
         .arg(terminfo_definition)
         .spawn()
         .unwrap();
