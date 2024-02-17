@@ -14,6 +14,8 @@ use buffer::TerminalBuffer;
 pub use format_tracker::FormatTag;
 use format_tracker::FormatTracker;
 
+use crate::error::backtraced_err;
+
 mod ansi;
 mod buffer;
 mod format_tracker;
@@ -52,6 +54,7 @@ enum TerminalInputPayload {
     Many(&'static [u8]),
 }
 
+#[derive(Clone)]
 pub enum TerminalInput {
     // Normal keypress
     Ascii(u8),
@@ -123,10 +126,22 @@ fn extract_terminfo() -> Result<TempDir, ExtractTerminfoError> {
     Ok(temp_dir)
 }
 
+#[derive(Error, Debug)]
+enum SpawnShellErrorKind {
+    #[error("failed to fork")]
+    Fork(#[source] Errno),
+    #[error("failed to exec")]
+    Exec(#[source] Errno),
+}
+
+#[derive(Error, Debug)]
+#[error(transparent)]
+struct SpawnShellError(#[from] SpawnShellErrorKind);
+
 /// Spawn a shell in a child process and return the file descriptor used for I/O
-fn spawn_shell(terminfo_dir: &Path) -> OwnedFd {
+fn spawn_shell(terminfo_dir: &Path) -> Result<OwnedFd, SpawnShellError> {
     unsafe {
-        let res = nix::pty::forkpty(None, None).unwrap();
+        let res = nix::pty::forkpty(None, None).map_err(SpawnShellErrorKind::Fork)?;
         match res.fork_result {
             ForkResult::Parent { .. } => (),
             ForkResult::Child => {
@@ -146,22 +161,35 @@ fn spawn_shell(terminfo_dir: &Path) -> OwnedFd {
                 std::env::set_var("TERMINFO", terminfo_dir);
                 std::env::set_var("TERM", "termie");
                 std::env::set_var("PS1", "$ ");
-                nix::unistd::execvp(shell_name, &args).unwrap();
+                nix::unistd::execvp(shell_name, &args).map_err(SpawnShellErrorKind::Exec)?;
                 // Should never run
                 std::process::exit(1);
             }
         }
-        res.master
+        Ok(res.master)
     }
 }
 
-fn set_nonblock(fd: &OwnedFd) {
-    let flags = nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL).unwrap();
-    let mut flags =
-        nix::fcntl::OFlag::from_bits(flags & nix::fcntl::OFlag::O_ACCMODE.bits()).unwrap();
+#[derive(Error, Debug)]
+enum SetNonblockError {
+    #[error("failed to get current fcntl args")]
+    GetCurrent(#[source] Errno),
+    #[error("failed to parse retrieved oflags")]
+    ParseFlags,
+    #[error("failed to set new fcntl args")]
+    SetNew(#[source] Errno),
+}
+
+fn set_nonblock(fd: &OwnedFd) -> Result<(), SetNonblockError> {
+    let flags = nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL)
+        .map_err(SetNonblockError::GetCurrent)?;
+    let mut flags = nix::fcntl::OFlag::from_bits(flags & nix::fcntl::OFlag::O_ACCMODE.bits())
+        .ok_or(SetNonblockError::ParseFlags)?;
     flags.set(nix::fcntl::OFlag::O_NONBLOCK, true);
 
-    nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(flags)).unwrap();
+    nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(flags))
+        .map_err(SetNonblockError::SetNew)?;
+    Ok(())
 }
 
 fn split_format_data_for_scrollback(
@@ -245,7 +273,49 @@ pub struct TerminalData<T> {
     pub visible: T,
 }
 
-ioctl_write_ptr_bad!(set_window_size, nix::libc::TIOCSWINSZ, nix::pty::Winsize);
+ioctl_write_ptr_bad!(
+    set_window_size_ioctl,
+    nix::libc::TIOCSWINSZ,
+    nix::pty::Winsize
+);
+
+#[derive(Debug, Error)]
+enum SetWindowSizeErrorKind {
+    #[error("height too large")]
+    HeightTooLarge(#[source] std::num::TryFromIntError),
+    #[error("width too large")]
+    WidthTooLarge(#[source] std::num::TryFromIntError),
+    #[error("failed to execute ioctl")]
+    IoctlFailed(#[source] Errno),
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct SetWindowSizeError(#[from] SetWindowSizeErrorKind);
+
+fn set_window_size(fd: &OwnedFd, width: usize, height: usize) -> Result<(), SetWindowSizeError> {
+    let win_size = nix::pty::Winsize {
+        ws_row: height
+            .try_into()
+            .map_err(SetWindowSizeErrorKind::HeightTooLarge)?,
+        ws_col: width
+            .try_into()
+            .map_err(SetWindowSizeErrorKind::WidthTooLarge)?,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    unsafe {
+        set_window_size_ioctl(fd.as_raw_fd(), &win_size)
+            .map_err(SetWindowSizeErrorKind::IoctlFailed)?;
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct WriteError(#[from] Errno);
 
 pub struct TerminalEmulator {
     parser: AnsiParser,
@@ -257,31 +327,38 @@ pub struct TerminalEmulator {
     _terminfo_dir: TempDir,
 }
 
-pub const TERMINAL_WIDTH: u16 = 50;
-pub const TERMINAL_HEIGHT: u16 = 16;
+pub const TERMINAL_WIDTH: usize = 50;
+pub const TERMINAL_HEIGHT: usize = 16;
+
+#[derive(Debug, Error)]
+enum CreateTerminalEmulatorErrorKind {
+    #[error("failed to extract terminfo")]
+    ExtractTerminfo(#[from] ExtractTerminfoError),
+    #[error("failed to spawn shell")]
+    SpawnShell(#[from] SpawnShellError),
+    #[error("failed to set fd as non-blocking")]
+    SetNonblock(#[from] SetNonblockError),
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct CreateTerminalEmulatorError(#[from] CreateTerminalEmulatorErrorKind);
 
 impl TerminalEmulator {
-    pub fn new() -> TerminalEmulator {
-        let terminfo_dir = extract_terminfo().unwrap();
-        let fd = spawn_shell(terminfo_dir.path());
-        set_nonblock(&fd);
+    pub fn new() -> Result<TerminalEmulator, CreateTerminalEmulatorError> {
+        let terminfo_dir =
+            extract_terminfo().map_err(CreateTerminalEmulatorErrorKind::ExtractTerminfo)?;
+        let fd = spawn_shell(terminfo_dir.path())
+            .map_err(CreateTerminalEmulatorErrorKind::SpawnShell)?;
+        set_nonblock(&fd).map_err(CreateTerminalEmulatorErrorKind::SetNonblock)?;
 
-        let win_size = nix::pty::Winsize {
-            ws_row: TERMINAL_HEIGHT,
-            ws_col: TERMINAL_WIDTH,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-
-        unsafe {
-            set_window_size(fd.as_raw_fd(), &win_size).unwrap();
+        if let Err(e) = set_window_size(&fd, TERMINAL_WIDTH, TERMINAL_HEIGHT) {
+            error!("Failed to set initial window size: {}", backtraced_err(&e));
         }
 
-        TerminalEmulator {
+        let ret = TerminalEmulator {
             parser: AnsiParser::new(),
-            // FIXME: Should be provided by GUI (or updated)
-            // Initial size matches bash default
-            terminal_buffer: TerminalBuffer::new(TERMINAL_WIDTH as usize, TERMINAL_HEIGHT as usize),
+            terminal_buffer: TerminalBuffer::new(TERMINAL_WIDTH, TERMINAL_HEIGHT),
             format_tracker: FormatTracker::new(),
             decckm_mode: false,
             cursor_state: CursorState {
@@ -291,44 +368,43 @@ impl TerminalEmulator {
             },
             fd,
             _terminfo_dir: terminfo_dir,
-        }
+        };
+        Ok(ret)
     }
 
-    pub fn set_win_size(&mut self, width_chars: usize, height_chars: usize) {
+    pub fn set_win_size(
+        &mut self,
+        width_chars: usize,
+        height_chars: usize,
+    ) -> Result<(), SetWindowSizeError> {
         let response =
             self.terminal_buffer
                 .set_win_size(width_chars, height_chars, &self.cursor_state.pos);
         self.cursor_state.pos = response.new_cursor_pos;
 
         if response.changed {
-            let win_size = nix::pty::Winsize {
-                ws_row: height_chars as u16,
-                ws_col: width_chars as u16,
-                ws_xpixel: 0,
-                ws_ypixel: 0,
-            };
-
-            unsafe {
-                set_window_size(self.fd.as_raw_fd(), &win_size).unwrap();
-            }
+            set_window_size(&self.fd, width_chars, height_chars)?;
         }
+
+        Ok(())
     }
 
-    pub fn write(&mut self, to_write: TerminalInput) {
+    pub fn write(&mut self, to_write: TerminalInput) -> Result<(), WriteError> {
         match to_write.to_payload(self.decckm_mode) {
             TerminalInputPayload::Single(c) => {
                 let mut written = 0;
                 while written == 0 {
-                    written = nix::unistd::write(self.fd.as_raw_fd(), &[c]).unwrap();
+                    written = nix::unistd::write(self.fd.as_raw_fd(), &[c])?;
                 }
             }
             TerminalInputPayload::Many(mut to_write) => {
                 while !to_write.is_empty() {
-                    let written = nix::unistd::write(self.fd.as_raw_fd(), to_write).unwrap();
+                    let written = nix::unistd::write(self.fd.as_raw_fd(), to_write)?;
                     to_write = &to_write[written..];
                 }
             }
         };
+        Ok(())
     }
 
     pub fn read(&mut self) {

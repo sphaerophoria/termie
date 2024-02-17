@@ -6,29 +6,32 @@ use eframe::egui::{
     FontFamily, FontId, InputState, Key, Modifiers, Rect, TextFormat, TextStyle, Ui,
 };
 
+use std::borrow::Cow;
+
+use crate::error::backtraced_err;
+
 const REGULAR_FONT_NAME: &str = "hack";
 const BOLD_FONT_NAME: &str = "hack-bold";
 
 fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalEmulator) {
     for event in &input.raw.events {
-        match event {
-            Event::Text(text) => {
-                for c in text.as_bytes() {
-                    terminal_emulator.write(TerminalInput::Ascii(*c));
-                }
-            }
+        let inputs: Cow<'static, [TerminalInput]> = match event {
+            Event::Text(text) => text
+                .as_bytes()
+                .iter()
+                .map(|c| TerminalInput::Ascii(*c))
+                .collect::<Vec<_>>()
+                .into(),
             Event::Key {
                 key: Key::Enter,
                 pressed: true,
                 ..
-            } => {
-                terminal_emulator.write(TerminalInput::Enter);
-            }
+            } => [TerminalInput::Enter].as_ref().into(),
             // https://github.com/emilk/egui/issues/3653
             Event::Copy => {
                 // NOTE: Technically not correct if we were on a mac, but also we are using linux
                 // syscalls so we'd have to solve that before this is a problem
-                terminal_emulator.write(TerminalInput::Ctrl(b'c'));
+                [TerminalInput::Ctrl(b'c')].as_ref().into()
             }
             Event::Key {
                 key,
@@ -40,68 +43,66 @@ fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalE
                     let name = key.name();
                     assert!(name.len() == 1);
                     let name_c = name.as_bytes()[0];
-                    terminal_emulator.write(TerminalInput::Ctrl(name_c));
+                    vec![TerminalInput::Ctrl(name_c)].into()
                 } else if *key == Key::OpenBracket {
-                    terminal_emulator.write(TerminalInput::Ctrl(b'['));
+                    [TerminalInput::Ctrl(b'[')].as_ref().into()
                 } else if *key == Key::CloseBracket {
-                    terminal_emulator.write(TerminalInput::Ctrl(b']'));
+                    [TerminalInput::Ctrl(b']')].as_ref().into()
                 } else if *key == Key::Backslash {
-                    terminal_emulator.write(TerminalInput::Ctrl(b'\\'));
+                    [TerminalInput::Ctrl(b'\\')].as_ref().into()
                 } else {
                     info!("Unexpected ctrl key: {}", key.name());
+                    continue;
                 }
             }
             Event::Key {
                 key: Key::Backspace,
                 pressed: true,
                 ..
-            } => {
-                terminal_emulator.write(TerminalInput::Backspace);
-            }
+            } => [TerminalInput::Backspace].as_ref().into(),
             Event::Key {
                 key: Key::ArrowUp,
                 pressed: true,
                 ..
-            } => {
-                terminal_emulator.write(TerminalInput::ArrowUp);
-            }
+            } => [TerminalInput::ArrowUp].as_ref().into(),
             Event::Key {
                 key: Key::ArrowDown,
                 pressed: true,
                 ..
-            } => {
-                terminal_emulator.write(TerminalInput::ArrowDown);
-            }
+            } => [TerminalInput::ArrowDown].as_ref().into(),
             Event::Key {
                 key: Key::ArrowLeft,
                 pressed: true,
                 ..
-            } => {
-                terminal_emulator.write(TerminalInput::ArrowLeft);
-            }
+            } => [TerminalInput::ArrowLeft].as_ref().into(),
             Event::Key {
                 key: Key::ArrowRight,
                 pressed: true,
                 ..
-            } => {
-                terminal_emulator.write(TerminalInput::ArrowRight);
-            }
+            } => [TerminalInput::ArrowRight].as_ref().into(),
             Event::Key {
                 key: Key::Home,
                 pressed: true,
                 ..
-            } => {
-                terminal_emulator.write(TerminalInput::Home);
-            }
+            } => [TerminalInput::Home].as_ref().into(),
             Event::Key {
                 key: Key::End,
                 pressed: true,
                 ..
-            } => {
-                terminal_emulator.write(TerminalInput::End);
+            } => [TerminalInput::End].as_ref().into(),
+            _ => {
+                continue;
             }
-            _ => (),
         };
+
+        for input in inputs.as_ref() {
+            if let Err(e) = terminal_emulator.write(input.clone()) {
+                error!(
+                    "Failed to write input to terminal emulator: {}",
+                    backtraced_err(&e)
+                );
+            }
+        }
     }
 }
 
@@ -185,7 +186,7 @@ fn setup_fonts(ctx: &egui::Context) {
     fonts
         .families
         .get_mut(&FontFamily::Monospace)
-        .unwrap()
+        .expect("egui should provide a monospace font")
         .insert(0, REGULAR_FONT_NAME.to_owned());
 
     fonts.families.insert(
@@ -240,10 +241,11 @@ fn create_terminal_output_layout_job(
     style: &egui::Style,
     width: f32,
     data: &[u8],
-) -> (LayoutJob, TextFormat) {
+) -> Result<(LayoutJob, TextFormat), std::str::Utf8Error> {
     let text_style = &style.text_styles[&TextStyle::Monospace];
+    let data_utf8 = std::str::from_utf8(data)?;
     let mut job = egui::text::LayoutJob::simple(
-        std::str::from_utf8(data).unwrap().to_string(),
+        data_utf8.to_string(),
         text_style.clone(),
         style.visuals.text_color(),
         width,
@@ -252,7 +254,7 @@ fn create_terminal_output_layout_job(
     job.wrap.break_anywhere = true;
     let textformat = job.sections[0].format.clone();
     job.sections.clear();
-    (job, textformat)
+    Ok((job, textformat))
 }
 
 fn add_terminal_data_to_ui(
@@ -260,9 +262,9 @@ fn add_terminal_data_to_ui(
     data: &[u8],
     format_data: &[FormatTag],
     font_size: f32,
-) -> egui::Response {
+) -> Result<egui::Response, std::str::Utf8Error> {
     let (mut job, mut textformat) =
-        create_terminal_output_layout_job(ui.style(), ui.available_width(), data);
+        create_terminal_output_layout_job(ui.style(), ui.available_width(), data)?;
 
     let default_color = textformat.color;
     let terminal_fonts = TerminalFonts::new();
@@ -286,7 +288,7 @@ fn add_terminal_data_to_ui(
         });
     }
 
-    ui.label(job)
+    Ok(ui.label(job))
 }
 
 struct TerminalOutputRenderResponse {
@@ -321,11 +323,26 @@ fn render_terminal_output(
         .auto_shrink([false, false])
         .stick_to_bottom(true)
         .show(ui, |ui| {
-            let scrollback_area =
-                add_terminal_data_to_ui(ui, scrollback_data, &format_data.scrollback, font_size)
-                    .rect;
-            let canvas_area =
-                add_terminal_data_to_ui(ui, canvas_data, &format_data.visible, font_size).rect;
+            let error_logged_rect =
+                |response: Result<egui::Response, std::str::Utf8Error>| match response {
+                    Ok(v) => v.rect,
+                    Err(e) => {
+                        error!("failed to add terminal data to ui: {}", backtraced_err(&e));
+                        Rect::NOTHING
+                    }
+                };
+            let scrollback_area = error_logged_rect(add_terminal_data_to_ui(
+                ui,
+                scrollback_data,
+                &format_data.scrollback,
+                font_size,
+            ));
+            let canvas_area = error_logged_rect(add_terminal_data_to_ui(
+                ui,
+                canvas_data,
+                &format_data.visible,
+                font_size,
+            ));
             TerminalOutputRenderResponse {
                 scrollback_area,
                 canvas_area,
@@ -391,8 +408,12 @@ impl eframe::App for TermieGui {
                 let width_chars = (ui.available_width() / character_size.0).floor();
                 let height_chars = (ui.available_height() / character_size.1).floor();
 
-                self.terminal_emulator
-                    .set_win_size(width_chars as usize, height_chars as usize);
+                if let Err(e) = self
+                    .terminal_emulator
+                    .set_win_size(width_chars as usize, height_chars as usize)
+                {
+                    error!("Failed to update window size: {}", backtraced_err(&e));
+                }
 
                 ui.set_width((width_chars + 0.5) * character_size.0);
                 ui.set_height((height_chars + 0.5) * character_size.1);
@@ -430,12 +451,11 @@ impl eframe::App for TermieGui {
     }
 }
 
-pub fn run(terminal_emulator: TerminalEmulator) {
+pub fn run(terminal_emulator: TerminalEmulator) -> Result<(), eframe::Error> {
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
         "Termie",
         native_options,
         Box::new(move |cc| Box::new(TermieGui::new(cc, terminal_emulator))),
     )
-    .unwrap();
 }

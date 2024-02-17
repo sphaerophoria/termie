@@ -1,4 +1,5 @@
 use std::ops::Range;
+use thiserror::Error;
 
 use super::{CursorPos, TerminalData};
 
@@ -42,26 +43,40 @@ fn calc_line_ranges(buf: &[u8], width: usize) -> Vec<Range<usize>> {
     ret
 }
 
-fn buf_to_cursor_pos(buf: &[u8], width: usize, height: usize, buf_pos: usize) -> CursorPos {
+#[derive(Debug, Error)]
+#[error("invalid buffer position {buf_pos} for buffer of len {buf_len}")]
+struct InvalidBufPos {
+    buf_pos: usize,
+    buf_len: usize,
+}
+
+fn buf_to_cursor_pos(
+    buf: &[u8],
+    width: usize,
+    height: usize,
+    buf_pos: usize,
+) -> Result<CursorPos, InvalidBufPos> {
     let new_line_ranges = calc_line_ranges(buf, width);
     let new_visible_line_ranges = line_ranges_to_visible_line_ranges(&new_line_ranges, height);
     let (new_cursor_y, new_cursor_line) = new_visible_line_ranges
         .iter()
         .enumerate()
         .find(|(_i, r)| r.end >= buf_pos)
-        .unwrap();
+        .ok_or(InvalidBufPos {
+            buf_pos,
+            buf_len: buf.len(),
+        })?;
 
-    let new_cursor_x = if buf_pos < new_cursor_line.start {
+    if buf_pos < new_cursor_line.start {
         info!("Old cursor position no longer on screen");
-        0
-    } else {
-        buf_pos - new_cursor_line.start
+        return Ok(CursorPos { x: 0, y: 0 });
     };
 
-    CursorPos {
+    let new_cursor_x = buf_pos - new_cursor_line.start;
+    Ok(CursorPos {
         x: new_cursor_x,
         y: new_cursor_y,
-    }
+    })
 }
 
 fn unwrapped_line_end_pos(buf: &[u8], start_pos: usize) -> usize {
@@ -190,7 +205,8 @@ impl TerminalBuffer {
         );
         let write_range = write_idx..write_idx + data.len();
         self.buf[write_range.clone()].copy_from_slice(data);
-        let new_cursor_pos = buf_to_cursor_pos(&self.buf, self.width, self.height, write_range.end);
+        let new_cursor_pos = buf_to_cursor_pos(&self.buf, self.width, self.height, write_range.end)
+            .expect("write range should be valid in buf");
         TerminalBufferInsertResponse {
             written_range: write_range,
             new_cursor_pos,
@@ -347,7 +363,8 @@ impl TerminalBuffer {
         // can just look up where the cursor is supposed to be and map it back to it's new cursor
         // position
         let buf_pos = pad_buffer_for_write(&mut self.buf, self.width, self.height, cursor_pos, 0);
-        let new_cursor_pos = buf_to_cursor_pos(&self.buf, width, height, buf_pos);
+        let new_cursor_pos = buf_to_cursor_pos(&self.buf, width, height, buf_pos)
+            .expect("buf pos should exist in buffer");
 
         self.width = width;
         self.height = height;

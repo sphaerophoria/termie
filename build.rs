@@ -13,8 +13,10 @@ fn main() {
         .arg("-x")
         .arg(terminfo_definition)
         .spawn()
-        .unwrap();
-    let status = child.wait().unwrap();
+        .expect("Failed to spawn terminfo compiler");
+    let status = child
+        .wait()
+        .expect("failed to get terminfo compiler result");
     assert!(status.success());
 
     let terminfo_tarball_path = out_dir.join("terminfo.tar");
@@ -23,7 +25,7 @@ fn main() {
         .write(true)
         .truncate(true)
         .open(terminfo_tarball_path)
-        .unwrap();
+        .expect("Failed to open terminfo tarball for writing");
 
     let mut tar_builder = tar::Builder::new(BufWriter::new(terminfo_tarball_file));
     tar_builder
