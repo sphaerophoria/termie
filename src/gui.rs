@@ -318,6 +318,7 @@ fn render_terminal_output(
     }
 
     let response = egui::ScrollArea::new([false, true])
+        .auto_shrink([false, false])
         .stick_to_bottom(true)
         .show(ui, |ui| {
             let scrollback_area =
