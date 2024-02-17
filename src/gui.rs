@@ -366,6 +366,10 @@ impl TermieGui {
             style.override_text_style = Some(TextStyle::Monospace);
         });
 
+        cc.egui_ctx.options_mut(|options| {
+            options.zoom_with_keyboard = false;
+        });
+
         setup_fonts(&cc.egui_ctx);
 
         TermieGui {
