@@ -104,20 +104,41 @@ fn line_ranges_to_visible_line_ranges(
     &line_ranges[first_visible_line..]
 }
 
+struct PadBufferForWriteResponse {
+    /// Where to copy data into
+    write_idx: usize,
+    /// Indexes where we added data
+    inserted_padding: Range<usize>,
+}
+
 fn pad_buffer_for_write(
     buf: &mut Vec<u8>,
     width: usize,
     height: usize,
     cursor_pos: &CursorPos,
     write_len: usize,
-) -> usize {
+) -> PadBufferForWriteResponse {
     let mut visible_line_ranges = {
         // Calculate in block scope to avoid accidental usage of scrollback line ranges later
         let line_ranges = calc_line_ranges(buf, width);
         line_ranges_to_visible_line_ranges(&line_ranges, height).to_vec()
     };
 
-    for _ in visible_line_ranges.len()..cursor_pos.y + 1 {
+    let mut padding_start_pos = None;
+    let mut num_inserted_characters = 0;
+
+    let vertical_padding_needed = if cursor_pos.y + 1 > visible_line_ranges.len() {
+        cursor_pos.y + 1 - visible_line_ranges.len()
+    } else {
+        0
+    };
+
+    if vertical_padding_needed != 0 {
+        padding_start_pos = Some(buf.len());
+        num_inserted_characters += vertical_padding_needed;
+    }
+
+    for _ in 0..vertical_padding_needed {
         buf.push(b'\n');
         let newline_pos = buf.len() - 1;
         visible_line_ranges.push(newline_pos..newline_pos);
@@ -134,17 +155,31 @@ fn pad_buffer_for_write(
     // whatever was in the buffer before
     let actual_end = unwrapped_line_end_pos(buf, line_range.start);
 
+    // If we did not set the padding start position, it means that we are padding not at the end of
+    // the buffer, but at the end of a line
+    if padding_start_pos.is_none() {
+        padding_start_pos = Some(actual_end);
+    }
+
     let number_of_spaces = if desired_end > actual_end {
         desired_end - actual_end
     } else {
         0
     };
 
+    num_inserted_characters += number_of_spaces;
+
     for i in 0..number_of_spaces {
         buf.insert(actual_end + i, b' ');
     }
 
-    desired_start
+    let start_buf_pos =
+        padding_start_pos.expect("start buf pos should be guaranteed initialized by this point");
+
+    PadBufferForWriteResponse {
+        write_idx: desired_start,
+        inserted_padding: start_buf_pos..start_buf_pos + num_inserted_characters,
+    }
 }
 
 fn cursor_to_buf_pos(
@@ -167,12 +202,18 @@ fn cursor_to_buf_pos(
 }
 
 pub struct TerminalBufferInsertResponse {
+    /// Range of written data after insertion of padding
     pub written_range: Range<usize>,
+    /// Range of written data that is new. Note this will shift all data after it
+    /// Includes padding that was previously not there, e.g. newlines needed to get to the
+    /// requested row for writing
+    pub insertion_range: Range<usize>,
     pub new_cursor_pos: CursorPos,
 }
 
 pub struct TerminalBufferSetWinSizeResponse {
     pub changed: bool,
+    pub insertion_range: Range<usize>,
     pub new_cursor_pos: CursorPos,
 }
 
@@ -196,7 +237,10 @@ impl TerminalBuffer {
         cursor_pos: &CursorPos,
         data: &[u8],
     ) -> TerminalBufferInsertResponse {
-        let write_idx = pad_buffer_for_write(
+        let PadBufferForWriteResponse {
+            write_idx,
+            inserted_padding,
+        } = pad_buffer_for_write(
             &mut self.buf,
             self.width,
             self.height,
@@ -209,6 +253,7 @@ impl TerminalBuffer {
             .expect("write range should be valid in buf");
         TerminalBufferInsertResponse {
             written_range: write_range,
+            insertion_range: inserted_padding,
             new_cursor_pos,
         }
     }
@@ -240,11 +285,15 @@ impl TerminalBuffer {
                 let used_spaces = num_inserted + num_overwritten;
                 TerminalBufferInsertResponse {
                     written_range: buf_pos..buf_pos + used_spaces,
+                    insertion_range: buf_pos..buf_pos + num_inserted,
                     new_cursor_pos: cursor_pos.clone(),
                 }
             }
             None => {
-                let write_idx = pad_buffer_for_write(
+                let PadBufferForWriteResponse {
+                    write_idx,
+                    inserted_padding,
+                } = pad_buffer_for_write(
                     &mut self.buf,
                     self.width,
                     self.height,
@@ -253,6 +302,7 @@ impl TerminalBuffer {
                 );
                 TerminalBufferInsertResponse {
                     written_range: write_idx..write_idx + num_spaces,
+                    insertion_range: inserted_padding,
                     new_cursor_pos: cursor_pos.clone(),
                 }
             }
@@ -355,6 +405,7 @@ impl TerminalBuffer {
         if !changed {
             return TerminalBufferSetWinSizeResponse {
                 changed: false,
+                insertion_range: 0..0,
                 new_cursor_pos: cursor_pos.clone(),
             };
         }
@@ -362,7 +413,10 @@ impl TerminalBuffer {
         // Ensure that the cursor position has a valid buffer position. That way when we resize we
         // can just look up where the cursor is supposed to be and map it back to it's new cursor
         // position
-        let buf_pos = pad_buffer_for_write(&mut self.buf, self.width, self.height, cursor_pos, 0);
+        let pad_response =
+            pad_buffer_for_write(&mut self.buf, self.width, self.height, cursor_pos, 0);
+        let buf_pos = pad_response.write_idx;
+        let inserted_padding = pad_response.inserted_padding;
         let new_cursor_pos = buf_to_cursor_pos(&self.buf, width, height, buf_pos)
             .expect("buf pos should exist in buffer");
 
@@ -371,6 +425,7 @@ impl TerminalBuffer {
 
         TerminalBufferSetWinSizeResponse {
             changed,
+            insertion_range: inserted_padding,
             new_cursor_pos,
         }
     }
@@ -391,9 +446,10 @@ mod test {
         let mut buf = b"asdf\n1234\nzxyw".to_vec();
 
         let cursor_pos = CursorPos { x: 8, y: 0 };
-        let copy_idx = pad_buffer_for_write(&mut buf, 10, 10, &cursor_pos, 10);
+        let response = pad_buffer_for_write(&mut buf, 10, 10, &cursor_pos, 10);
         assert_eq!(buf, b"asdf              \n1234\nzxyw");
-        assert_eq!(copy_idx, 8);
+        assert_eq!(response.write_idx, 8);
+        assert_eq!(response.inserted_padding, 4..18);
     }
 
     #[test]
@@ -554,24 +610,31 @@ mod test {
         // Happy path
         let response = canvas.insert_spaces(&CursorPos { x: 2, y: 0 }, 2);
         assert_eq!(response.written_range, 2..4);
+        assert_eq!(response.insertion_range, 2..4);
         assert_eq!(response.new_cursor_pos, CursorPos { x: 2, y: 0 });
         assert_eq!(canvas.data().visible, b"as  df\n123456789012345\n");
 
         // Truncation at newline
         let response = canvas.insert_spaces(&CursorPos { x: 2, y: 0 }, 1000);
         assert_eq!(response.written_range, 2..10);
+        assert_eq!(response.insertion_range, 2..6);
         assert_eq!(response.new_cursor_pos, CursorPos { x: 2, y: 0 });
         assert_eq!(canvas.data().visible, b"as        \n123456789012345\n");
 
         // Truncation at line wrap
         let response = canvas.insert_spaces(&CursorPos { x: 4, y: 1 }, 1000);
         assert_eq!(response.written_range, 15..21);
+        assert_eq!(
+            response.insertion_range.start - response.insertion_range.end,
+            0
+        );
         assert_eq!(response.new_cursor_pos, CursorPos { x: 4, y: 1 });
         assert_eq!(canvas.data().visible, b"as        \n1234      12345\n");
 
         // Insertion at non-existant buffer pos
         let response = canvas.insert_spaces(&CursorPos { x: 2, y: 4 }, 3);
         assert_eq!(response.written_range, 30..33);
+        assert_eq!(response.insertion_range, 27..34);
         assert_eq!(response.new_cursor_pos, CursorPos { x: 2, y: 4 });
         assert_eq!(
             canvas.data().visible,

@@ -157,6 +157,26 @@ impl FormatTracker {
         self.color_info.sort_by(|a, b| a.start.cmp(&b.start));
     }
 
+    /// Move all tags > range.start to range.start + range.len
+    /// No gaps in coloring data, so one range must expand instead of just be adjusted
+    pub fn push_range_adjustment(&mut self, range: Range<usize>) {
+        let range_len = range.end - range.start;
+        for info in &mut self.color_info {
+            if info.end <= range.start {
+                continue;
+            }
+
+            if info.start > range.start {
+                info.start += range_len;
+                if info.end != usize::MAX {
+                    info.end += range_len;
+                }
+            } else if info.end != usize::MAX {
+                info.end += range_len;
+            }
+        }
+    }
+
     pub fn tags(&self) -> Vec<FormatTag> {
         self.color_info.clone()
     }
@@ -490,6 +510,122 @@ mod test {
                     color: TerminalColor::Default,
                     bold: false
                 }
+            ]
+        );
+    }
+
+    #[test]
+    fn test_range_adjustment() {
+        let mut format_tracker = FormatTracker::new();
+        let mut cursor = CursorState {
+            pos: CursorPos { x: 0, y: 0 },
+            color: TerminalColor::Blue,
+            bold: false,
+        };
+        format_tracker.push_range(&cursor, 0..5);
+        cursor.color = TerminalColor::Red;
+        format_tracker.push_range(&cursor, 5..10);
+
+        assert_eq!(
+            format_tracker.tags(),
+            [
+                FormatTag {
+                    start: 0,
+                    end: 5,
+                    color: TerminalColor::Blue,
+                    bold: false,
+                },
+                FormatTag {
+                    start: 5,
+                    end: 10,
+                    color: TerminalColor::Red,
+                    bold: false,
+                },
+                FormatTag {
+                    start: 10,
+                    end: usize::MAX,
+                    color: TerminalColor::Default,
+                    bold: false,
+                },
+            ]
+        );
+
+        // This should extend the first section, and push all the ones after
+        format_tracker.push_range_adjustment(0..3);
+        assert_eq!(
+            format_tracker.tags(),
+            [
+                FormatTag {
+                    start: 0,
+                    end: 8,
+                    color: TerminalColor::Blue,
+                    bold: false,
+                },
+                FormatTag {
+                    start: 8,
+                    end: 13,
+                    color: TerminalColor::Red,
+                    bold: false,
+                },
+                FormatTag {
+                    start: 13,
+                    end: usize::MAX,
+                    color: TerminalColor::Default,
+                    bold: false,
+                },
+            ]
+        );
+
+        // Should have no effect as we're in the last range
+        format_tracker.push_range_adjustment(15..50);
+        assert_eq!(
+            format_tracker.tags(),
+            [
+                FormatTag {
+                    start: 0,
+                    end: 8,
+                    color: TerminalColor::Blue,
+                    bold: false,
+                },
+                FormatTag {
+                    start: 8,
+                    end: 13,
+                    color: TerminalColor::Red,
+                    bold: false,
+                },
+                FormatTag {
+                    start: 13,
+                    end: usize::MAX,
+                    color: TerminalColor::Default,
+                    bold: false,
+                },
+            ]
+        );
+
+        // And for good measure, check something in the middle
+        // This should not touch the first segment, extend the second, and move the third forward
+        format_tracker.push_range_adjustment(10..12);
+        assert_eq!(
+            format_tracker.tags(),
+            [
+                FormatTag {
+                    start: 0,
+                    end: 8,
+                    color: TerminalColor::Blue,
+                    bold: false,
+                },
+                FormatTag {
+                    start: 8,
+                    end: 15,
+                    color: TerminalColor::Red,
+                    bold: false,
+                },
+                FormatTag {
+                    start: 15,
+                    end: usize::MAX,
+                    color: TerminalColor::Default,
+                    bold: false,
+                },
             ]
         );
     }

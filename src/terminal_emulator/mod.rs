@@ -426,6 +426,8 @@ impl TerminalEmulator {
                             .terminal_buffer
                             .insert_data(&self.cursor_state.pos, &data);
                         self.format_tracker
+                            .push_range_adjustment(response.insertion_range);
+                        self.format_tracker
                             .push_range(&self.cursor_state, response.written_range);
                         self.cursor_state.pos = response.new_cursor_pos;
                     }
@@ -505,7 +507,7 @@ impl TerminalEmulator {
                             .terminal_buffer
                             .insert_spaces(&self.cursor_state.pos, num_spaces);
                         self.format_tracker
-                            .push_range(&self.cursor_state, response.written_range);
+                            .push_range_adjustment(response.insertion_range);
                     }
                     TerminalOutput::ResetMode(mode) => match mode {
                         Mode::Decckm => {
