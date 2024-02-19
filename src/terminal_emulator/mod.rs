@@ -464,8 +464,6 @@ impl TerminalEmulator {
                         self.cursor_state.pos.x = 0;
                     }
                     TerminalOutput::Newline => {
-                        self.terminal_buffer
-                            .append_newline_at_line_end(&self.cursor_state.pos);
                         self.cursor_state.pos.y += 1;
                     }
                     TerminalOutput::Backspace => {

@@ -277,6 +277,17 @@ fn add_terminal_data_to_ui(
             range.end = data.len()
         }
 
+        match range.start.cmp(&data.len()) {
+            std::cmp::Ordering::Greater => {
+                warn!("Invalid format data for text");
+                continue;
+            }
+            std::cmp::Ordering::Equal => {
+                continue;
+            }
+            _ => (),
+        }
+
         textformat.font_id.family = terminal_fonts.get_family(tag.bold);
         textformat.font_id.size = font_size;
         textformat.color = terminal_color_to_egui(&default_color, &color);

@@ -14,7 +14,6 @@ use super::{CursorPos, TerminalData};
 /// ```
 fn calc_line_ranges(buf: &[u8], width: usize) -> Vec<Range<usize>> {
     let mut ret = vec![];
-    let mut bytes_since_newline = 0;
 
     let mut current_start = 0;
 
@@ -22,19 +21,16 @@ fn calc_line_ranges(buf: &[u8], width: usize) -> Vec<Range<usize>> {
         if *c == b'\n' {
             ret.push(current_start..i);
             current_start = i + 1;
-            bytes_since_newline = 0;
             continue;
         }
 
-        assert!(bytes_since_newline <= width);
-        if bytes_since_newline == width {
+        let bytes_since_start = i - current_start;
+        assert!(bytes_since_start <= width);
+        if bytes_since_start == width {
             ret.push(current_start..i);
             current_start = i;
-            bytes_since_newline = 0;
             continue;
         }
-
-        bytes_since_newline += 1;
     }
 
     if buf.len() > current_start {
@@ -43,7 +39,7 @@ fn calc_line_ranges(buf: &[u8], width: usize) -> Vec<Range<usize>> {
     ret
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Eq, PartialEq)]
 #[error("invalid buffer position {buf_pos} for buffer of len {buf_len}")]
 struct InvalidBufPos {
     buf_pos: usize,
@@ -99,8 +95,8 @@ fn line_ranges_to_visible_line_ranges(
     if line_ranges.is_empty() {
         return line_ranges;
     }
-    let last_line_idx = line_ranges.len();
-    let first_visible_line = last_line_idx.saturating_sub(height);
+    let num_lines = line_ranges.len();
+    let first_visible_line = num_lines.saturating_sub(height);
     &line_ranges[first_visible_line..]
 }
 
@@ -182,6 +178,20 @@ fn pad_buffer_for_write(
     }
 }
 
+fn cursor_to_buf_pos_from_visible_line_ranges(
+    cursor_pos: &CursorPos,
+    visible_line_ranges: &[Range<usize>],
+) -> Option<(usize, Range<usize>)> {
+    visible_line_ranges.get(cursor_pos.y).and_then(|range| {
+        let candidate_pos = range.start + cursor_pos.x;
+        if candidate_pos > range.end {
+            None
+        } else {
+            Some((candidate_pos, range.clone()))
+        }
+    })
+}
+
 fn cursor_to_buf_pos(
     buf: &[u8],
     cursor_pos: &CursorPos,
@@ -191,14 +201,7 @@ fn cursor_to_buf_pos(
     let line_ranges = calc_line_ranges(buf, width);
     let visible_line_ranges = line_ranges_to_visible_line_ranges(&line_ranges, height);
 
-    visible_line_ranges.get(cursor_pos.y).and_then(|range| {
-        let candidate_pos = range.start + cursor_pos.x;
-        if candidate_pos > range.end {
-            None
-        } else {
-            Some((candidate_pos, range.clone()))
-        }
-    })
+    cursor_to_buf_pos_from_visible_line_ranges(cursor_pos, visible_line_ranges)
 }
 
 pub struct TerminalBufferInsertResponse {
@@ -311,16 +314,51 @@ impl TerminalBuffer {
 
     pub fn clear_forwards(&mut self, cursor_pos: &CursorPos) -> Option<usize> {
         let line_ranges = calc_line_ranges(&self.buf, self.width);
+        let visible_line_ranges = line_ranges_to_visible_line_ranges(&line_ranges, self.height);
 
-        let line_range = line_ranges.get(cursor_pos.y)?;
-
-        if cursor_pos.x > line_range.end {
+        let Some((buf_pos, _)) =
+            cursor_to_buf_pos_from_visible_line_ranges(cursor_pos, visible_line_ranges)
+        else {
             return None;
+        };
+
+        let previous_last_char = self.buf[buf_pos];
+        self.buf.truncate(buf_pos);
+
+        // If we truncate at the start of a line, and the previous line did not end with a newline,
+        // the first inserted newline will not have an effect on the number of visible lines. This
+        // is because we are allowed to have a trailing newline that is longer than the terminal
+        // width. To keep the cursor pos the same as it was before, if the truncate position is the
+        // start of a line, and the previous character is _not_ a newline, insert an extra newline
+        // to compensate
+        //
+        // If we truncated a newline it's the same situation
+        if cursor_pos.x == 0 && buf_pos > 0 && self.buf[buf_pos - 1] != b'\n'
+            || previous_last_char == b'\n'
+        {
+            self.buf.push(b'\n');
         }
 
-        let clear_pos = line_range.start + cursor_pos.x;
-        self.buf.truncate(clear_pos);
-        Some(clear_pos)
+        for line in visible_line_ranges {
+            if line.end > buf_pos {
+                self.buf.push(b'\n');
+            }
+        }
+
+        let new_cursor_pos =
+            buf_to_cursor_pos(&self.buf, self.width, self.height, buf_pos).map(|mut pos| {
+                // NOTE: buf to cursor pos may put the cursor one past the end of the line. In this
+                // case it's ok because there are two valid cursor positions and we only care about one
+                // of them
+                if pos.x == self.width {
+                    pos.x = 0;
+                    pos.y += 1;
+                }
+                pos
+            });
+
+        assert_eq!(new_cursor_pos, Ok(cursor_pos.clone()));
+        Some(buf_pos)
     }
 
     pub fn clear_line_forwards(&mut self, cursor_pos: &CursorPos) -> Option<Range<usize>> {
@@ -335,25 +373,6 @@ impl TerminalBuffer {
 
     pub fn clear_all(&mut self) {
         self.buf.clear();
-    }
-
-    pub fn append_newline_at_line_end(&mut self, pos: &CursorPos) {
-        let line_ranges = calc_line_ranges(&self.buf, self.width);
-        let Some(line_range) = line_ranges.get(pos.y) else {
-            return;
-        };
-
-        let newline_pos = self
-            .buf
-            .iter()
-            .enumerate()
-            .skip(line_range.start)
-            .find(|(_i, b)| **b == b'\n')
-            .map(|(i, _b)| i);
-
-        if newline_pos.is_none() {
-            self.buf.push(b'\n');
-        }
     }
 
     pub fn delete_forwards(
@@ -455,9 +474,51 @@ mod test {
     #[test]
     fn test_canvas_clear_forwards() {
         let mut buffer = TerminalBuffer::new(5, 5);
-        buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"012\n3456789");
+        // Push enough data to get some in scrollback
+        buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"012343456789\n0123456789\n1234");
+
+        assert_eq!(
+            buffer.data().visible,
+            b"\
+                   34567\
+                   89\n\
+                   01234\
+                   56789\n\
+                   1234\n"
+        );
         buffer.clear_forwards(&CursorPos { x: 1, y: 1 });
-        assert_eq!(buffer.data().visible, b"012\n3");
+        // Same amount of lines should be present before and after clear
+        assert_eq!(
+            buffer.data().visible,
+            b"\
+                   34567\
+                   8\n\
+                   \n\
+                   \n\
+                   \n"
+        );
+
+        // A few special cases.
+        // 1. Truncating on beginning of line and previous char was not a newline
+        let mut buffer = TerminalBuffer::new(5, 5);
+        buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"012340123401234012340123401234");
+        buffer.clear_forwards(&CursorPos { x: 0, y: 1 });
+        assert_eq!(buffer.data().visible, b"01234\n\n\n\n\n");
+
+        // 2. Truncating on beginning of line and previous char was a newline
+        let mut buffer = TerminalBuffer::new(5, 5);
+        buffer.insert_data(
+            &CursorPos { x: 0, y: 0 },
+            b"01234\n0123401234012340123401234",
+        );
+        buffer.clear_forwards(&CursorPos { x: 0, y: 1 });
+        assert_eq!(buffer.data().visible, b"01234\n\n\n\n\n");
+
+        // 3. Truncating on a newline
+        let mut buffer = TerminalBuffer::new(5, 5);
+        buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"\n\n\n\n\n\n");
+        buffer.clear_forwards(&CursorPos { x: 0, y: 1 });
+        assert_eq!(buffer.data().visible, b"\n\n\n\n\n");
     }
 
     #[test]
@@ -515,40 +576,6 @@ mod test {
             buffer.data().visible,
             b"\n\n   hello world\n\n\n    hello world\n"
         );
-    }
-
-    #[test]
-    fn test_canvas_newline_append() {
-        let mut canvas = TerminalBuffer::new(10, 10);
-        let mut cursor_pos = CursorPos { x: 0, y: 0 };
-        canvas.insert_data(&cursor_pos, b"asdf\n1234\nzxyw");
-
-        cursor_pos.x = 2;
-        cursor_pos.y = 1;
-        canvas.append_newline_at_line_end(&cursor_pos);
-        assert_eq!(canvas.buf, b"asdf\n1234\nzxyw\n");
-
-        canvas.clear_forwards(&cursor_pos);
-        assert_eq!(canvas.buf, b"asdf\n12");
-
-        cursor_pos.x = 0;
-        cursor_pos.y = 1;
-        canvas.append_newline_at_line_end(&cursor_pos);
-        assert_eq!(canvas.buf, b"asdf\n12\n");
-
-        cursor_pos.x = 0;
-        cursor_pos.y = 2;
-        canvas.insert_data(&cursor_pos, b"01234567890123456");
-
-        cursor_pos.x = 4;
-        cursor_pos.y = 3;
-        canvas.clear_forwards(&cursor_pos);
-        assert_eq!(canvas.buf, b"asdf\n12\n01234567890123");
-
-        cursor_pos.x = 4;
-        cursor_pos.y = 2;
-        canvas.append_newline_at_line_end(&cursor_pos);
-        assert_eq!(canvas.buf, b"asdf\n12\n01234567890123\n");
     }
 
     #[test]
