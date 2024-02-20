@@ -90,6 +90,26 @@ fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalE
                 pressed: true,
                 ..
             } => [TerminalInput::End].as_ref().into(),
+            Event::Key {
+                key: Key::Delete,
+                pressed: true,
+                ..
+            } => [TerminalInput::Delete].as_ref().into(),
+            Event::Key {
+                key: Key::Insert,
+                pressed: true,
+                ..
+            } => [TerminalInput::Insert].as_ref().into(),
+            Event::Key {
+                key: Key::PageUp,
+                pressed: true,
+                ..
+            } => [TerminalInput::PageUp].as_ref().into(),
+            Event::Key {
+                key: Key::PageDown,
+                pressed: true,
+                ..
+            } => [TerminalInput::PageDown].as_ref().into(),
             _ => {
                 continue;
             }

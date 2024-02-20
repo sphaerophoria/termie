@@ -68,6 +68,10 @@ pub enum TerminalInput {
     ArrowDown,
     Home,
     End,
+    Delete,
+    Insert,
+    PageUp,
+    PageDown,
 }
 
 impl TerminalInput {
@@ -104,6 +108,14 @@ impl TerminalInput {
                 true => TerminalInputPayload::Many(b"\x1bOF"),
                 false => TerminalInputPayload::Many(b"\x1b[F"),
             },
+            // Why \e[3~? It seems like we are emulating the vt510. Other terminals do it, so we
+            // can too
+            // https://web.archive.org/web/20160304024035/http://www.vt100.net/docs/vt510-rm/chapter8
+            // https://en.wikipedia.org/wiki/Delete_character
+            TerminalInput::Delete => TerminalInputPayload::Many(b"\x1b[3~"),
+            TerminalInput::Insert => TerminalInputPayload::Many(b"\x1b[2~"),
+            TerminalInput::PageUp => TerminalInputPayload::Many(b"\x1b[5~"),
+            TerminalInput::PageDown => TerminalInputPayload::Many(b"\x1b[6~"),
         }
     }
 }
