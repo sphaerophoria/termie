@@ -451,6 +451,28 @@ impl TerminalEmulator {
                             self.cursor_state.pos.y = y - 1;
                         }
                     }
+                    TerminalOutput::SetCursorPosRel { x, y } => {
+                        if let Some(x) = x {
+                            let x: i64 = x.into();
+                            let current_x: i64 = self
+                                .cursor_state
+                                .pos
+                                .x
+                                .try_into()
+                                .expect("x position larger than i64 can handle");
+                            self.cursor_state.pos.x = (current_x + x).max(0) as usize;
+                        }
+                        if let Some(y) = y {
+                            let y: i64 = y.into();
+                            let current_y: i64 = self
+                                .cursor_state
+                                .pos
+                                .y
+                                .try_into()
+                                .expect("y position larger than i64 can handle");
+                            self.cursor_state.pos.y = (current_y + y).max(0) as usize;
+                        }
+                    }
                     TerminalOutput::ClearForwards => {
                         if let Some(buf_pos) =
                             self.terminal_buffer.clear_forwards(&self.cursor_state.pos)

@@ -53,6 +53,7 @@ impl SelectGraphicRendition {
 #[derive(Debug, Eq, PartialEq)]
 pub enum TerminalOutput {
     SetCursorPos { x: Option<usize>, y: Option<usize> },
+    SetCursorPosRel { x: Option<i32>, y: Option<i32> },
     ClearForwards,
     ClearAll,
     CarriageReturn,
@@ -96,13 +97,13 @@ fn extract_param(idx: usize, params: &[Option<usize>]) -> Option<usize> {
 fn split_params_into_semicolon_delimited_usize(params: &[u8]) -> Result<Vec<Option<usize>>, ()> {
     let params = params
         .split(|b| *b == b';')
-        .map(parse_param_as_usize)
+        .map(parse_param_as::<usize>)
         .collect::<Result<Vec<Option<usize>>, ()>>();
 
     params
 }
 
-fn parse_param_as_usize(param_bytes: &[u8]) -> Result<Option<usize>, ()> {
+fn parse_param_as<T: std::str::FromStr>(param_bytes: &[u8]) -> Result<Option<T>, ()> {
     let param_str =
         std::str::from_utf8(param_bytes).expect("parameter should always be valid utf8");
     if param_str.is_empty() {
@@ -247,6 +248,62 @@ impl AnsiParser {
                 AnsiParserInner::Csi(parser) => {
                     parser.push(*b);
                     match parser.state {
+                        CsiParserState::Finished(b'A') => {
+                            let Ok(param) = parse_param_as::<i32>(&parser.params) else {
+                                warn!("Invalid cursor move up distance");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            output.push(TerminalOutput::SetCursorPosRel {
+                                x: None,
+                                y: Some(-param.unwrap_or(1)),
+                            });
+                            self.inner = AnsiParserInner::Empty;
+                        }
+                        CsiParserState::Finished(b'B') => {
+                            let Ok(param) = parse_param_as::<i32>(&parser.params) else {
+                                warn!("Invalid cursor move down distance");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            output.push(TerminalOutput::SetCursorPosRel {
+                                x: None,
+                                y: Some(param.unwrap_or(1)),
+                            });
+                            self.inner = AnsiParserInner::Empty;
+                        }
+                        CsiParserState::Finished(b'C') => {
+                            let Ok(param) = parse_param_as::<i32>(&parser.params) else {
+                                warn!("Invalid cursor move right distance");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            output.push(TerminalOutput::SetCursorPosRel {
+                                x: Some(param.unwrap_or(1)),
+                                y: None,
+                            });
+                            self.inner = AnsiParserInner::Empty;
+                        }
+                        CsiParserState::Finished(b'D') => {
+                            let Ok(param) = parse_param_as::<i32>(&parser.params) else {
+                                warn!("Invalid cursor move left distance");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            output.push(TerminalOutput::SetCursorPosRel {
+                                x: Some(-param.unwrap_or(1)),
+                                y: None,
+                            });
+                            self.inner = AnsiParserInner::Empty;
+                        }
                         CsiParserState::Finished(b'H') => {
                             let params =
                                 split_params_into_semicolon_delimited_usize(&parser.params);
@@ -265,7 +322,7 @@ impl AnsiParser {
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'G') => {
-                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
                                 warn!("Invalid cursor set position sequence");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
@@ -281,7 +338,7 @@ impl AnsiParser {
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'J') => {
-                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
                                 warn!("Invalid clear command");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
@@ -297,7 +354,7 @@ impl AnsiParser {
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'K') => {
-                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
                                 warn!("Invalid erase in line command");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
@@ -316,7 +373,7 @@ impl AnsiParser {
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'P') => {
-                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
                                 warn!("Invalid del command");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
@@ -367,7 +424,7 @@ impl AnsiParser {
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'@') => {
-                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
                                 warn!("Invalid ich command");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
@@ -647,5 +704,141 @@ mod test {
         let output = output_buffer.push(b"\x1b[?1h");
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::SetMode(Mode::Decckm));
+    }
+
+    #[test]
+    fn test_rel_move_up_parsing() {
+        let mut output_buffer = AnsiParser::new();
+        let output = output_buffer.push(b"\x1b[1A");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[A");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[10A");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-10)
+            }
+        );
+    }
+
+    #[test]
+    fn test_rel_move_down_parsing() {
+        let mut output_buffer = AnsiParser::new();
+        let output = output_buffer.push(b"\x1b[1B");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[B");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[10B");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(10)
+            }
+        );
+    }
+
+    #[test]
+    fn test_rel_move_right_parsing() {
+        let mut output_buffer = AnsiParser::new();
+        let output = output_buffer.push(b"\x1b[1C");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[C");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[10C");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(10)
+            }
+        );
+    }
+
+    #[test]
+    fn test_rel_move_left_parsing() {
+        let mut output_buffer = AnsiParser::new();
+        let output = output_buffer.push(b"\x1b[1D");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(-1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[D");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(-1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[10D");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(-10)
+            }
+        );
     }
 }
