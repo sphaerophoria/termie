@@ -299,13 +299,18 @@ fn add_terminal_data_to_ui(
 
         match range.start.cmp(&data.len()) {
             std::cmp::Ordering::Greater => {
-                warn!("Invalid format data for text");
+                debug!("Skipping unusable format data");
                 continue;
             }
             std::cmp::Ordering::Equal => {
                 continue;
             }
             _ => (),
+        }
+
+        if range.end > data.len() {
+            debug!("Truncating format data end");
+            range.end = data.len();
         }
 
         textformat.font_id.family = terminal_fonts.get_family(tag.bold);
