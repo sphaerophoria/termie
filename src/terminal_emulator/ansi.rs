@@ -259,8 +259,8 @@ impl AnsiParser {
                             };
 
                             output.push(TerminalOutput::SetCursorPos {
-                                x: Some(extract_param(0, &params).unwrap_or(1)),
-                                y: Some(extract_param(1, &params).unwrap_or(1)),
+                                x: Some(extract_param(1, &params).unwrap_or(1)),
+                                y: Some(extract_param(0, &params).unwrap_or(1)),
                             });
                             self.inner = AnsiParserInner::Empty;
                         }
@@ -419,8 +419,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(32),
-                y: Some(15)
+                y: Some(32),
+                x: Some(15)
             }
         ));
 
@@ -429,8 +429,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(1),
-                y: Some(32)
+                y: Some(1),
+                x: Some(32)
             }
         ));
 
@@ -439,8 +439,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(32),
-                y: Some(1)
+                y: Some(32),
+                x: Some(1)
             }
         ));
 
@@ -449,8 +449,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(32),
-                y: Some(1)
+                y: Some(32),
+                x: Some(1)
             }
         ));
 
@@ -459,8 +459,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(1),
-                y: Some(1)
+                y: Some(1),
+                x: Some(1)
             }
         ));
 
@@ -469,8 +469,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(1),
-                y: Some(1)
+                y: Some(1),
+                x: Some(1)
             }
         ));
     }
