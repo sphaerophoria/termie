@@ -505,6 +505,14 @@ impl TerminalEmulator {
                             self.cursor_state.pos.x -= 1;
                         }
                     }
+                    TerminalOutput::InsertLines(num_lines) => {
+                        let response = self
+                            .terminal_buffer
+                            .insert_lines(&self.cursor_state.pos, num_lines);
+                        self.format_tracker.delete_range(response.deleted_range);
+                        self.format_tracker
+                            .push_range_adjustment(response.inserted_range);
+                    }
                     TerminalOutput::Delete(num_chars) => {
                         let deleted_buf_range = self
                             .terminal_buffer

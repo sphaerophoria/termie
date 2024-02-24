@@ -214,6 +214,14 @@ pub struct TerminalBufferInsertResponse {
     pub new_cursor_pos: CursorPos,
 }
 
+#[derive(Debug)]
+pub struct TerminalBufferInsertLineResponse {
+    /// Range of deleted data **before insertion**
+    pub deleted_range: Range<usize>,
+    /// Range of inserted data
+    pub inserted_range: Range<usize>,
+}
+
 pub struct TerminalBufferSetWinSizeResponse {
     pub changed: bool,
     pub insertion_range: Range<usize>,
@@ -309,6 +317,59 @@ impl TerminalBuffer {
                     new_cursor_pos: cursor_pos.clone(),
                 }
             }
+        }
+    }
+
+    pub fn insert_lines(
+        &mut self,
+        cursor_pos: &CursorPos,
+        mut num_lines: usize,
+    ) -> TerminalBufferInsertLineResponse {
+        let line_ranges = calc_line_ranges(&self.buf, self.width);
+        let visible_line_ranges = line_ranges_to_visible_line_ranges(&line_ranges, self.height);
+
+        // NOTE: Cursor x position is not used. If the cursor position was too far to the right,
+        // there may be no buffer position associated with it. Use Y only
+        let Some(line_range) = visible_line_ranges.get(cursor_pos.y) else {
+            return TerminalBufferInsertLineResponse {
+                deleted_range: 0..0,
+                inserted_range: 0..0,
+            };
+        };
+
+        let available_space = self.height - visible_line_ranges.len();
+        // If height is 10, and y is 5, we can only insert 5 lines. If we inserted more it would
+        // adjust the visible line range, and that would be a problem
+        num_lines = num_lines.min(self.height - cursor_pos.y);
+
+        let deletion_range = if num_lines > available_space {
+            let num_lines_removed = num_lines - available_space;
+            let removal_start_idx =
+                visible_line_ranges[visible_line_ranges.len() - num_lines_removed].start;
+            let deletion_range = removal_start_idx..self.buf.len();
+            self.buf.truncate(removal_start_idx);
+            deletion_range
+        } else {
+            0..0
+        };
+
+        let insertion_pos = line_range.start;
+
+        // Edge case, if the previous line ended in a line wrap, inserting a new line will not
+        // result in an extra line being shown on screen. E.g. with a width of 5, 01234 and 01234\n
+        // both look like a line of length 5. In this case we need to add another newline
+        if insertion_pos > 0 && self.buf[insertion_pos - 1] != b'\n' {
+            num_lines += 1;
+        }
+
+        self.buf.splice(
+            insertion_pos..insertion_pos,
+            std::iter::repeat(b'\n').take(num_lines),
+        );
+
+        TerminalBufferInsertLineResponse {
+            deleted_range: deletion_range,
+            inserted_range: insertion_pos..insertion_pos + num_lines,
         }
     }
 
@@ -717,5 +778,34 @@ mod test {
         let response = simulate_resize(&mut canvas, 10, 3, &response.new_cursor_pos);
         simulate_resize(&mut canvas, 10, 5, &response.new_cursor_pos);
         assert_eq!(canvas.data().visible, b"$         \n");
+    }
+
+    #[test]
+    fn test_insert_lines() {
+        let mut canvas = TerminalBuffer::new(5, 5);
+
+        // Test empty canvas
+        let response = canvas.insert_lines(&CursorPos { x: 0, y: 0 }, 3);
+        // Clear doesn't have to do anything as there's nothing in the canvas to push aside
+        assert_eq!(response.deleted_range.start - response.deleted_range.end, 0);
+        assert_eq!(
+            response.inserted_range.start - response.inserted_range.end,
+            0
+        );
+        assert_eq!(canvas.data().visible, b"");
+
+        // Test edge wrapped
+        canvas.insert_data(&CursorPos { x: 0, y: 0 }, b"0123456789asdf\nxyzw");
+        assert_eq!(canvas.data().visible, b"0123456789asdf\nxyzw\n");
+        let response = canvas.insert_lines(&CursorPos { x: 3, y: 2 }, 1);
+        assert_eq!(canvas.data().visible, b"0123456789\n\nasdf\nxyzw\n");
+        assert_eq!(response.deleted_range.start - response.deleted_range.end, 0);
+        assert_eq!(response.inserted_range, 10..12);
+
+        // Test newline wrapped + lines pushed off the edge
+        let response = canvas.insert_lines(&CursorPos { x: 3, y: 2 }, 1);
+        assert_eq!(canvas.data().visible, b"0123456789\n\n\nasdf\n");
+        assert_eq!(response.deleted_range, 17..22);
+        assert_eq!(response.inserted_range, 11..12);
     }
 }

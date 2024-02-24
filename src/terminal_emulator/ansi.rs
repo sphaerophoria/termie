@@ -60,6 +60,7 @@ pub enum TerminalOutput {
     ClearLineForwards,
     Newline,
     Backspace,
+    InsertLines(usize),
     Delete(usize),
     Sgr(SelectGraphicRendition),
     Data(Vec<u8>),
@@ -369,6 +370,18 @@ impl AnsiParser {
                                     output.push(TerminalOutput::Invalid);
                                 }
                             }
+
+                            self.inner = AnsiParserInner::Empty;
+                        }
+                        CsiParserState::Finished(b'L') => {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
+                                warn!("Invalid il command");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            output.push(TerminalOutput::InsertLines(param.unwrap_or(1)));
 
                             self.inner = AnsiParserInner::Empty;
                         }
