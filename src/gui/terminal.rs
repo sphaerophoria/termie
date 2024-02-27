@@ -433,8 +433,8 @@ impl TerminalWidget {
             let width_chars = (ui.available_width() / character_size.0).floor();
             let height_chars = (ui.available_height() / character_size.1).floor();
 
-            if let Err(e) = terminal_emulator
-                .set_win_size(width_chars as usize, height_chars as usize)
+            if let Err(e) =
+                terminal_emulator.set_win_size(width_chars as usize, height_chars as usize)
             {
                 error!("Failed to update window size: {}", backtraced_err(&*e));
             }

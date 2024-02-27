@@ -1,6 +1,8 @@
-use std::ops::Range;
+use std::{num::TryFromIntError, ops::Range};
 
-use super::{CursorState, TerminalColor};
+use super::{recording::NotIntOfType, CursorState, TerminalColor};
+use crate::terminal_emulator::recording::SnapshotItem;
+use thiserror::Error;
 
 fn ranges_overlap(a: Range<usize>, b: Range<usize>) -> bool {
     if a.end <= b.start {
@@ -118,6 +120,51 @@ struct ColorRangeAdjustment {
     to_insert: Option<FormatTag>,
 }
 
+#[derive(Debug, Error)]
+enum LoadFormatTagSnapshotError {
+    #[error("root element is not a map")]
+    RootNotMap,
+    #[error("start elemnt missing")]
+    StartMissing,
+    #[error("start is not a usize")]
+    StartNotUsize(#[source] NotIntOfType),
+    #[error("end element missing")]
+    EndMissing,
+    #[error("end could not be parsed as i64")]
+    EndNotInt,
+    #[error("end not usize (or -1)")]
+    EndNotUsize(#[source] TryFromIntError),
+    #[error("bold element missing")]
+    BoldMissing,
+    #[error("bold element not bool")]
+    BoldNotBool,
+    #[error("color element is missing")]
+    ColorMissing,
+    #[error("color not a string")]
+    ColorNotString,
+    #[error("failed to parse color from string")]
+    ParseColor(()),
+}
+
+#[derive(Debug, Error)]
+enum SnapshotFormatTagErrorKind {
+    #[error("start cannot be serialized as i64")]
+    StartNotI64(#[source] TryFromIntError),
+    #[error("end cannot be serialized as i64")]
+    EndNotI64(#[source] TryFromIntError),
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct SnapshotFormatTagError(#[from] SnapshotFormatTagErrorKind);
+
+mod format_tag_keys {
+    pub const START: &str = "start";
+    pub const END: &str = "end";
+    pub const COLOR: &str = "color";
+    pub const BOLD: &str = "bold";
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FormatTag {
     pub start: usize,
@@ -125,6 +172,70 @@ pub struct FormatTag {
     pub color: TerminalColor,
     pub bold: bool,
 }
+
+impl FormatTag {
+    fn from_snapshot(snapshot: SnapshotItem) -> Result<FormatTag, LoadFormatTagSnapshotError> {
+        use LoadFormatTagSnapshotError::*;
+        let mut root = snapshot.into_map().map_err(|_| RootNotMap)?;
+
+        let start = root.remove(format_tag_keys::START).ok_or(StartMissing)?;
+        let start = start.into_num::<usize>().map_err(StartNotUsize)?;
+
+        let end = root.remove(format_tag_keys::END).ok_or(EndMissing)?;
+        let end = end.into_i64().map_err(|_| EndNotInt)?;
+        let end: usize = if end == -1 {
+            usize::MAX
+        } else {
+            end.try_into().map_err(EndNotUsize)?
+        };
+
+        let bold = root.remove(format_tag_keys::BOLD).ok_or(BoldMissing)?;
+        let bold = bold.into_bool().map_err(|_| BoldNotBool)?;
+
+        let color = root.remove(format_tag_keys::COLOR).ok_or(ColorMissing)?;
+        let color = color.into_string().map_err(|_| ColorNotString)?;
+        let color = color.parse().map_err(ParseColor)?;
+
+        Ok(FormatTag {
+            start,
+            end,
+            bold,
+            color,
+        })
+    }
+
+    fn snapshot(&self) -> Result<SnapshotItem, SnapshotFormatTagError> {
+        use SnapshotFormatTagErrorKind::*;
+        let start_i64: i64 = self.start.try_into().map_err(StartNotI64)?;
+        let end_i64: i64 = if self.end == usize::MAX {
+            -1
+        } else {
+            self.end.try_into().map_err(EndNotI64)?
+        };
+        let arr = [
+            (format_tag_keys::START.to_string(), start_i64.into()),
+            (format_tag_keys::END.to_string(), end_i64.into()),
+            (
+                format_tag_keys::COLOR.to_string(),
+                self.color.to_string().into(),
+            ),
+            (format_tag_keys::BOLD.to_string(), self.bold.into()),
+        ];
+        Ok(SnapshotItem::Map(arr.into()))
+    }
+}
+
+#[derive(Debug, Error)]
+enum LoadFormatTrackerSnapshotErrorKind {
+    #[error("root element is not an array")]
+    NotArray,
+    #[error("failed to load format tag")]
+    LoadTag(#[from] LoadFormatTagSnapshotError),
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct LoadFormatTrackerSnapshotError(#[from] LoadFormatTrackerSnapshotErrorKind);
 
 pub struct FormatTracker {
     color_info: Vec<FormatTag>,
@@ -140,6 +251,27 @@ impl FormatTracker {
                 bold: false,
             }],
         }
+    }
+
+    pub fn from_snapshot(
+        snapshot: SnapshotItem,
+    ) -> Result<FormatTracker, LoadFormatTrackerSnapshotError> {
+        use LoadFormatTrackerSnapshotErrorKind::*;
+        let arr = snapshot.into_vec().map_err(|_| NotArray)?;
+
+        let color_info: Result<Vec<FormatTag>, LoadFormatTagSnapshotError> =
+            arr.into_iter().map(FormatTag::from_snapshot).collect();
+        let color_info = color_info.map_err(LoadTag)?;
+        Ok(FormatTracker { color_info })
+    }
+
+    pub fn snapshot(&self) -> Result<SnapshotItem, SnapshotFormatTagError> {
+        Ok(SnapshotItem::Array(
+            self.color_info
+                .iter()
+                .map(FormatTag::snapshot)
+                .collect::<Result<Vec<_>, _>>()?,
+        ))
     }
 
     pub fn push_range(&mut self, cursor: &CursorState, range: Range<usize>) {
@@ -628,5 +760,55 @@ mod test {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn test_format_tag_snapshot() {
+        let tag = FormatTag {
+            start: 0,
+            // Edge case test, usize max needs to be set to -1
+            end: usize::MAX,
+            color: TerminalColor::Blue,
+            bold: true,
+        };
+
+        let loaded = FormatTag::from_snapshot(tag.snapshot().expect("failed to snapshot"))
+            .expect("failed to load snapshot");
+        assert_eq!(loaded, tag);
+
+        let tag = FormatTag {
+            start: 50,
+            // Edge case test, usize max needs to be set to -1
+            end: 105,
+            color: TerminalColor::Red,
+            bold: false,
+        };
+        let loaded = FormatTag::from_snapshot(tag.snapshot().expect("failed to snapshot"))
+            .expect("failed to load snapshot");
+        assert_eq!(loaded, tag);
+    }
+
+    #[test]
+    fn test_format_tracker_snapshot() {
+        let tracker = FormatTracker {
+            color_info: vec![
+                FormatTag {
+                    start: 0,
+                    end: 5,
+                    color: TerminalColor::Black,
+                    bold: false,
+                },
+                FormatTag {
+                    start: 5,
+                    end: usize::MAX,
+                    color: TerminalColor::Red,
+                    bold: true,
+                },
+            ],
+        };
+
+        let loaded = FormatTracker::from_snapshot(tracker.snapshot().expect("failed to snapshot"))
+            .expect("failed to load snapshot");
+        assert_eq!(loaded.color_info, tracker.color_info);
     }
 }

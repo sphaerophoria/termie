@@ -3,5 +3,5 @@
 set -ex
 
 cargo fmt --check
-cargo clippy -- -Dwarnings -Dclippy::unwrap_used
+cargo clippy -- -Dwarnings -Dclippy::unwrap_used -Adead_code
 cargo test

@@ -1,9 +1,8 @@
-use crate::terminal_emulator::{
-    PtyIo, TerminalEmulator,
+use crate::{
+    error::backtraced_err,
+    terminal_emulator::{PtyIo, RecordingHandle, TerminalEmulator},
 };
-use eframe::egui::{
-    self, CentralPanel, TextStyle,
-};
+use eframe::egui::{self, CentralPanel, TextStyle};
 
 use terminal::TerminalWidget;
 
@@ -12,6 +11,7 @@ mod terminal;
 struct TermieGui {
     terminal_emulator: TerminalEmulator<PtyIo>,
     terminal_widget: TerminalWidget,
+    recording_handle: Option<RecordingHandle>,
 }
 
 impl TermieGui {
@@ -24,10 +24,10 @@ impl TermieGui {
             options.zoom_with_keyboard = false;
         });
 
-
         TermieGui {
             terminal_emulator,
             terminal_widget: TerminalWidget::new(&cc.egui_ctx),
+            recording_handle: None,
         }
     }
 }
@@ -40,6 +40,21 @@ impl eframe::App for TermieGui {
 
         panel_response.response.context_menu(|ui| {
             self.terminal_widget.show_options(ui);
+
+            if self.recording_handle.is_some() {
+                if ui.button("Stop recording").clicked() {
+                    self.recording_handle = None;
+                }
+            } else if ui.button("Start recording").clicked() {
+                match self.terminal_emulator.start_recording() {
+                    Ok(v) => {
+                        self.recording_handle = Some(v);
+                    }
+                    Err(e) => {
+                        error!("failed to start recording: {}", backtraced_err(&e));
+                    }
+                }
+            }
         });
     }
 }

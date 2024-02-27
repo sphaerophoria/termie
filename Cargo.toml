@@ -11,6 +11,7 @@ tar = "0.4.40"
 nix = { version = "0.27.1", default-features = false, features = ["term", "process", "fs", "ioctl"] }
 tempfile = "3.10.0"
 thiserror = "1.0.56"
+tinyjson = "2.5.1"
 
 [build-dependencies]
 tar = "0.4.40"
