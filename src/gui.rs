@@ -1,5 +1,5 @@
 use crate::terminal_emulator::{
-    CursorPos, FormatTag, TerminalColor, TerminalEmulator, TerminalInput,
+    CursorPos, FormatTag, PtyIo, TerminalColor, TerminalEmulator, TerminalInput,
 };
 use eframe::egui::{
     self, text::LayoutJob, CentralPanel, Color32, DragValue, Event, FontData, FontDefinitions,
@@ -13,7 +13,7 @@ use crate::error::backtraced_err;
 const REGULAR_FONT_NAME: &str = "hack";
 const BOLD_FONT_NAME: &str = "hack-bold";
 
-fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalEmulator) {
+fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalEmulator<PtyIo>) {
     for event in &input.raw.events {
         let inputs: Cow<'static, [TerminalInput]> = match event {
             Event::Text(text) => text
@@ -119,7 +119,7 @@ fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalE
             if let Err(e) = terminal_emulator.write(input.clone()) {
                 error!(
                     "Failed to write input to terminal emulator: {}",
-                    backtraced_err(&e)
+                    backtraced_err(&*e)
                 );
             }
         }
@@ -334,7 +334,7 @@ struct TerminalOutputRenderResponse {
 
 fn render_terminal_output(
     ui: &mut egui::Ui,
-    terminal_emulator: &TerminalEmulator,
+    terminal_emulator: &TerminalEmulator<PtyIo>,
     font_size: f32,
 ) -> TerminalOutputRenderResponse {
     let terminal_data = terminal_emulator.data();
@@ -408,13 +408,13 @@ impl DebugRenderer {
 }
 
 struct TermieGui {
-    terminal_emulator: TerminalEmulator,
+    terminal_emulator: TerminalEmulator<PtyIo>,
     font_size: f32,
     debug_renderer: DebugRenderer,
 }
 
 impl TermieGui {
-    fn new(cc: &eframe::CreationContext<'_>, terminal_emulator: TerminalEmulator) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, terminal_emulator: TerminalEmulator<PtyIo>) -> Self {
         cc.egui_ctx.style_mut(|style| {
             style.override_text_style = Some(TextStyle::Monospace);
         });
@@ -448,7 +448,7 @@ impl eframe::App for TermieGui {
                     .terminal_emulator
                     .set_win_size(width_chars as usize, height_chars as usize)
                 {
-                    error!("Failed to update window size: {}", backtraced_err(&e));
+                    error!("Failed to update window size: {}", backtraced_err(&*e));
                 }
 
                 ui.set_width((width_chars + 0.5) * character_size.0);
@@ -487,7 +487,7 @@ impl eframe::App for TermieGui {
     }
 }
 
-pub fn run(terminal_emulator: TerminalEmulator) -> Result<(), eframe::Error> {
+pub fn run(terminal_emulator: TerminalEmulator<PtyIo>) -> Result<(), eframe::Error> {
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
         "Termie",

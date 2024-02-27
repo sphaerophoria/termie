@@ -23,6 +23,6 @@ impl Display for FormattedError<'_> {
     }
 }
 
-pub fn backtraced_err<E: Error>(err: &E) -> FormattedError<'_> {
+pub fn backtraced_err(err: &dyn Error) -> FormattedError<'_> {
     FormattedError(err)
 }

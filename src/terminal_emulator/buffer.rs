@@ -770,8 +770,8 @@ mod test {
             response.new_cursor_pos.x = 0;
             let mut response = canvas.insert_data(&response.new_cursor_pos, &vec![b' '; width]);
             response.new_cursor_pos.x = 0;
-            let response = canvas.insert_data(&response.new_cursor_pos, b"$ ");
-            response
+
+            canvas.insert_data(&response.new_cursor_pos, b"$ ")
         }
         let response = simulate_resize(&mut canvas, 10, 5, &cursor_pos);
         let response = simulate_resize(&mut canvas, 10, 4, &response.new_cursor_pos);

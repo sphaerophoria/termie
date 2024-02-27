@@ -1,25 +1,20 @@
-use nix::{errno::Errno, ioctl_write_ptr_bad, unistd::ForkResult};
-use tempfile::TempDir;
-use thiserror::Error;
-
-use std::{
-    ffi::CStr,
-    fmt,
-    os::fd::{AsRawFd, OwnedFd},
-    path::Path,
-};
+use std::fmt;
 
 use ansi::{AnsiParser, SelectGraphicRendition, TerminalOutput};
 use buffer::TerminalBuffer;
-pub use format_tracker::FormatTag;
 use format_tracker::FormatTracker;
 
-use crate::error::backtraced_err;
+pub use format_tracker::FormatTag;
+pub use io::{PtyIo, TermIo};
+
+use crate::{error::backtraced_err, terminal_emulator::io::ReadResponse};
+
+use self::io::CreatePtyIoError;
 
 mod ansi;
 mod buffer;
 mod format_tracker;
-const TERMINFO: &[u8] = include_bytes!(std::concat!(std::env!("OUT_DIR"), "/terminfo.tar"));
+mod io;
 
 #[derive(Eq, PartialEq)]
 enum Mode {
@@ -120,90 +115,6 @@ impl TerminalInput {
     }
 }
 
-#[derive(Error, Debug)]
-enum ExtractTerminfoError {
-    #[error("failed to extract")]
-    Extraction(#[source] std::io::Error),
-    #[error("failed to create temp dir")]
-    CreateTempDir(#[source] std::io::Error),
-}
-
-fn extract_terminfo() -> Result<TempDir, ExtractTerminfoError> {
-    let mut terminfo_tarball = tar::Archive::new(TERMINFO);
-    let temp_dir = TempDir::new().map_err(ExtractTerminfoError::CreateTempDir)?;
-    terminfo_tarball
-        .unpack(temp_dir.path())
-        .map_err(ExtractTerminfoError::Extraction)?;
-
-    Ok(temp_dir)
-}
-
-#[derive(Error, Debug)]
-enum SpawnShellErrorKind {
-    #[error("failed to fork")]
-    Fork(#[source] Errno),
-    #[error("failed to exec")]
-    Exec(#[source] Errno),
-}
-
-#[derive(Error, Debug)]
-#[error(transparent)]
-struct SpawnShellError(#[from] SpawnShellErrorKind);
-
-/// Spawn a shell in a child process and return the file descriptor used for I/O
-fn spawn_shell(terminfo_dir: &Path) -> Result<OwnedFd, SpawnShellError> {
-    unsafe {
-        let res = nix::pty::forkpty(None, None).map_err(SpawnShellErrorKind::Fork)?;
-        match res.fork_result {
-            ForkResult::Parent { .. } => (),
-            ForkResult::Child => {
-                let shell_name = CStr::from_bytes_with_nul(b"bash\0")
-                    .expect("Should always have null terminator");
-                let args: &[&[u8]] = &[b"bash\0", b"--noprofile\0", b"--norc\0"];
-
-                let args: Vec<&'static CStr> = args
-                    .iter()
-                    .map(|v| {
-                        CStr::from_bytes_with_nul(v).expect("Should always have null terminator")
-                    })
-                    .collect::<Vec<_>>();
-
-                // Temporary workaround to avoid rendering issues
-                std::env::remove_var("PROMPT_COMMAND");
-                std::env::set_var("TERMINFO", terminfo_dir);
-                std::env::set_var("TERM", "termie");
-                std::env::set_var("PS1", "$ ");
-                nix::unistd::execvp(shell_name, &args).map_err(SpawnShellErrorKind::Exec)?;
-                // Should never run
-                std::process::exit(1);
-            }
-        }
-        Ok(res.master)
-    }
-}
-
-#[derive(Error, Debug)]
-enum SetNonblockError {
-    #[error("failed to get current fcntl args")]
-    GetCurrent(#[source] Errno),
-    #[error("failed to parse retrieved oflags")]
-    ParseFlags,
-    #[error("failed to set new fcntl args")]
-    SetNew(#[source] Errno),
-}
-
-fn set_nonblock(fd: &OwnedFd) -> Result<(), SetNonblockError> {
-    let flags = nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL)
-        .map_err(SetNonblockError::GetCurrent)?;
-    let mut flags = nix::fcntl::OFlag::from_bits(flags & nix::fcntl::OFlag::O_ACCMODE.bits())
-        .ok_or(SetNonblockError::ParseFlags)?;
-    flags.set(nix::fcntl::OFlag::O_NONBLOCK, true);
-
-    nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(flags))
-        .map_err(SetNonblockError::SetNew)?;
-    Ok(())
-}
-
 fn split_format_data_for_scrollback(
     tags: Vec<FormatTag>,
     scrollback_split: usize,
@@ -285,87 +196,24 @@ pub struct TerminalData<T> {
     pub visible: T,
 }
 
-ioctl_write_ptr_bad!(
-    set_window_size_ioctl,
-    nix::libc::TIOCSWINSZ,
-    nix::pty::Winsize
-);
-
-#[derive(Debug, Error)]
-enum SetWindowSizeErrorKind {
-    #[error("height too large")]
-    HeightTooLarge(#[source] std::num::TryFromIntError),
-    #[error("width too large")]
-    WidthTooLarge(#[source] std::num::TryFromIntError),
-    #[error("failed to execute ioctl")]
-    IoctlFailed(#[source] Errno),
-}
-
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct SetWindowSizeError(#[from] SetWindowSizeErrorKind);
-
-fn set_window_size(fd: &OwnedFd, width: usize, height: usize) -> Result<(), SetWindowSizeError> {
-    let win_size = nix::pty::Winsize {
-        ws_row: height
-            .try_into()
-            .map_err(SetWindowSizeErrorKind::HeightTooLarge)?,
-        ws_col: width
-            .try_into()
-            .map_err(SetWindowSizeErrorKind::WidthTooLarge)?,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-
-    unsafe {
-        set_window_size_ioctl(fd.as_raw_fd(), &win_size)
-            .map_err(SetWindowSizeErrorKind::IoctlFailed)?;
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct WriteError(#[from] Errno);
-
-pub struct TerminalEmulator {
+pub struct TerminalEmulator<Io: TermIo> {
     parser: AnsiParser,
     terminal_buffer: TerminalBuffer,
     format_tracker: FormatTracker,
     cursor_state: CursorState,
     decckm_mode: bool,
-    fd: OwnedFd,
-    _terminfo_dir: TempDir,
+    io: Io,
 }
 
 pub const TERMINAL_WIDTH: usize = 50;
 pub const TERMINAL_HEIGHT: usize = 16;
 
-#[derive(Debug, Error)]
-enum CreateTerminalEmulatorErrorKind {
-    #[error("failed to extract terminfo")]
-    ExtractTerminfo(#[from] ExtractTerminfoError),
-    #[error("failed to spawn shell")]
-    SpawnShell(#[from] SpawnShellError),
-    #[error("failed to set fd as non-blocking")]
-    SetNonblock(#[from] SetNonblockError),
-}
+impl TerminalEmulator<PtyIo> {
+    pub fn new() -> Result<TerminalEmulator<PtyIo>, CreatePtyIoError> {
+        let mut io = PtyIo::new()?;
 
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct CreateTerminalEmulatorError(#[from] CreateTerminalEmulatorErrorKind);
-
-impl TerminalEmulator {
-    pub fn new() -> Result<TerminalEmulator, CreateTerminalEmulatorError> {
-        let terminfo_dir =
-            extract_terminfo().map_err(CreateTerminalEmulatorErrorKind::ExtractTerminfo)?;
-        let fd = spawn_shell(terminfo_dir.path())
-            .map_err(CreateTerminalEmulatorErrorKind::SpawnShell)?;
-        set_nonblock(&fd).map_err(CreateTerminalEmulatorErrorKind::SetNonblock)?;
-
-        if let Err(e) = set_window_size(&fd, TERMINAL_WIDTH, TERMINAL_HEIGHT) {
-            error!("Failed to set initial window size: {}", backtraced_err(&e));
+        if let Err(e) = io.set_win_size(TERMINAL_WIDTH, TERMINAL_HEIGHT) {
+            error!("Failed to set initial window size: {}", backtraced_err(&*e));
         }
 
         let ret = TerminalEmulator {
@@ -378,40 +226,41 @@ impl TerminalEmulator {
                 bold: false,
                 color: TerminalColor::Default,
             },
-            fd,
-            _terminfo_dir: terminfo_dir,
+            io,
         };
         Ok(ret)
     }
+}
 
+impl<Io: TermIo> TerminalEmulator<Io> {
     pub fn set_win_size(
         &mut self,
         width_chars: usize,
         height_chars: usize,
-    ) -> Result<(), SetWindowSizeError> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let response =
             self.terminal_buffer
                 .set_win_size(width_chars, height_chars, &self.cursor_state.pos);
         self.cursor_state.pos = response.new_cursor_pos;
 
         if response.changed {
-            set_window_size(&self.fd, width_chars, height_chars)?;
+            self.io.set_win_size(width_chars, height_chars)?;
         }
 
         Ok(())
     }
 
-    pub fn write(&mut self, to_write: TerminalInput) -> Result<(), WriteError> {
+    pub fn write(&mut self, to_write: TerminalInput) -> Result<(), Box<dyn std::error::Error>> {
         match to_write.to_payload(self.decckm_mode) {
             TerminalInputPayload::Single(c) => {
                 let mut written = 0;
                 while written == 0 {
-                    written = nix::unistd::write(self.fd.as_raw_fd(), &[c])?;
+                    written = self.io.write(&[c])?;
                 }
             }
             TerminalInputPayload::Many(mut to_write) => {
                 while !to_write.is_empty() {
-                    let written = nix::unistd::write(self.fd.as_raw_fd(), to_write)?;
+                    let written = self.io.write(to_write)?;
                     to_write = &to_write[written..];
                 }
             }
@@ -419,153 +268,154 @@ impl TerminalEmulator {
         Ok(())
     }
 
+    fn handle_incoming_data(&mut self, incoming: &[u8]) {
+        let parsed = self.parser.push(incoming);
+        for segment in parsed {
+            match segment {
+                TerminalOutput::Data(data) => {
+                    let response = self
+                        .terminal_buffer
+                        .insert_data(&self.cursor_state.pos, &data);
+                    self.format_tracker
+                        .push_range_adjustment(response.insertion_range);
+                    self.format_tracker
+                        .push_range(&self.cursor_state, response.written_range);
+                    self.cursor_state.pos = response.new_cursor_pos;
+                }
+                TerminalOutput::SetCursorPos { x, y } => {
+                    if let Some(x) = x {
+                        self.cursor_state.pos.x = x - 1;
+                    }
+                    if let Some(y) = y {
+                        self.cursor_state.pos.y = y - 1;
+                    }
+                }
+                TerminalOutput::SetCursorPosRel { x, y } => {
+                    if let Some(x) = x {
+                        let x: i64 = x.into();
+                        let current_x: i64 = self
+                            .cursor_state
+                            .pos
+                            .x
+                            .try_into()
+                            .expect("x position larger than i64 can handle");
+                        self.cursor_state.pos.x = (current_x + x).max(0) as usize;
+                    }
+                    if let Some(y) = y {
+                        let y: i64 = y.into();
+                        let current_y: i64 = self
+                            .cursor_state
+                            .pos
+                            .y
+                            .try_into()
+                            .expect("y position larger than i64 can handle");
+                        self.cursor_state.pos.y = (current_y + y).max(0) as usize;
+                    }
+                }
+                TerminalOutput::ClearForwards => {
+                    if let Some(buf_pos) =
+                        self.terminal_buffer.clear_forwards(&self.cursor_state.pos)
+                    {
+                        self.format_tracker
+                            .push_range(&self.cursor_state, buf_pos..usize::MAX);
+                    }
+                }
+                TerminalOutput::ClearAll => {
+                    self.format_tracker
+                        .push_range(&self.cursor_state, 0..usize::MAX);
+                    self.terminal_buffer.clear_all();
+                }
+                TerminalOutput::ClearLineForwards => {
+                    if let Some(range) = self
+                        .terminal_buffer
+                        .clear_line_forwards(&self.cursor_state.pos)
+                    {
+                        self.format_tracker.delete_range(range);
+                    }
+                }
+                TerminalOutput::CarriageReturn => {
+                    self.cursor_state.pos.x = 0;
+                }
+                TerminalOutput::Newline => {
+                    self.cursor_state.pos.y += 1;
+                }
+                TerminalOutput::Backspace => {
+                    if self.cursor_state.pos.x >= 1 {
+                        self.cursor_state.pos.x -= 1;
+                    }
+                }
+                TerminalOutput::InsertLines(num_lines) => {
+                    let response = self
+                        .terminal_buffer
+                        .insert_lines(&self.cursor_state.pos, num_lines);
+                    self.format_tracker.delete_range(response.deleted_range);
+                    self.format_tracker
+                        .push_range_adjustment(response.inserted_range);
+                }
+                TerminalOutput::Delete(num_chars) => {
+                    let deleted_buf_range = self
+                        .terminal_buffer
+                        .delete_forwards(&self.cursor_state.pos, num_chars);
+                    if let Some(range) = deleted_buf_range {
+                        self.format_tracker.delete_range(range);
+                    }
+                }
+                TerminalOutput::Sgr(sgr) => {
+                    // Should this be one big match ???????
+                    if let Some(color) = TerminalColor::from_sgr(sgr) {
+                        self.cursor_state.color = color;
+                    } else if sgr == SelectGraphicRendition::Reset {
+                        self.cursor_state.color = TerminalColor::Default;
+                        self.cursor_state.bold = false;
+                    } else if sgr == SelectGraphicRendition::Bold {
+                        self.cursor_state.bold = true;
+                    } else {
+                        warn!("Unhandled sgr: {:?}", sgr);
+                    }
+                }
+                TerminalOutput::SetMode(mode) => match mode {
+                    Mode::Decckm => {
+                        self.decckm_mode = true;
+                    }
+                    _ => {
+                        warn!("unhandled set mode: {mode:?}");
+                    }
+                },
+                TerminalOutput::InsertSpaces(num_spaces) => {
+                    let response = self
+                        .terminal_buffer
+                        .insert_spaces(&self.cursor_state.pos, num_spaces);
+                    self.format_tracker
+                        .push_range_adjustment(response.insertion_range);
+                }
+                TerminalOutput::ResetMode(mode) => match mode {
+                    Mode::Decckm => {
+                        self.decckm_mode = false;
+                    }
+                    _ => {
+                        warn!("unhandled set mode: {mode:?}");
+                    }
+                },
+                TerminalOutput::Invalid => {}
+            }
+        }
+    }
+
     pub fn read(&mut self) {
         let mut buf = vec![0u8; 4096];
-        let mut ret = Ok(0);
-        while ret.is_ok() {
-            ret = nix::unistd::read(self.fd.as_raw_fd(), &mut buf);
-            let Ok(read_size) = ret else {
-                break;
+        loop {
+            let read_size = match self.io.read(&mut buf) {
+                Ok(ReadResponse::Empty) => break,
+                Ok(ReadResponse::Success(v)) => v,
+                Err(e) => {
+                    error!("Failed to read from child process: {e}");
+                    break;
+                }
             };
 
             let incoming = &buf[0..read_size];
             debug!("Incoming data: {:?}", std::str::from_utf8(incoming));
-            let parsed = self.parser.push(incoming);
-            for segment in parsed {
-                match segment {
-                    TerminalOutput::Data(data) => {
-                        let response = self
-                            .terminal_buffer
-                            .insert_data(&self.cursor_state.pos, &data);
-                        self.format_tracker
-                            .push_range_adjustment(response.insertion_range);
-                        self.format_tracker
-                            .push_range(&self.cursor_state, response.written_range);
-                        self.cursor_state.pos = response.new_cursor_pos;
-                    }
-                    TerminalOutput::SetCursorPos { x, y } => {
-                        if let Some(x) = x {
-                            self.cursor_state.pos.x = x - 1;
-                        }
-                        if let Some(y) = y {
-                            self.cursor_state.pos.y = y - 1;
-                        }
-                    }
-                    TerminalOutput::SetCursorPosRel { x, y } => {
-                        if let Some(x) = x {
-                            let x: i64 = x.into();
-                            let current_x: i64 = self
-                                .cursor_state
-                                .pos
-                                .x
-                                .try_into()
-                                .expect("x position larger than i64 can handle");
-                            self.cursor_state.pos.x = (current_x + x).max(0) as usize;
-                        }
-                        if let Some(y) = y {
-                            let y: i64 = y.into();
-                            let current_y: i64 = self
-                                .cursor_state
-                                .pos
-                                .y
-                                .try_into()
-                                .expect("y position larger than i64 can handle");
-                            self.cursor_state.pos.y = (current_y + y).max(0) as usize;
-                        }
-                    }
-                    TerminalOutput::ClearForwards => {
-                        if let Some(buf_pos) =
-                            self.terminal_buffer.clear_forwards(&self.cursor_state.pos)
-                        {
-                            self.format_tracker
-                                .push_range(&self.cursor_state, buf_pos..usize::MAX);
-                        }
-                    }
-                    TerminalOutput::ClearAll => {
-                        self.format_tracker
-                            .push_range(&self.cursor_state, 0..usize::MAX);
-                        self.terminal_buffer.clear_all();
-                    }
-                    TerminalOutput::ClearLineForwards => {
-                        if let Some(range) = self
-                            .terminal_buffer
-                            .clear_line_forwards(&self.cursor_state.pos)
-                        {
-                            self.format_tracker.delete_range(range);
-                        }
-                    }
-                    TerminalOutput::CarriageReturn => {
-                        self.cursor_state.pos.x = 0;
-                    }
-                    TerminalOutput::Newline => {
-                        self.cursor_state.pos.y += 1;
-                    }
-                    TerminalOutput::Backspace => {
-                        if self.cursor_state.pos.x >= 1 {
-                            self.cursor_state.pos.x -= 1;
-                        }
-                    }
-                    TerminalOutput::InsertLines(num_lines) => {
-                        let response = self
-                            .terminal_buffer
-                            .insert_lines(&self.cursor_state.pos, num_lines);
-                        self.format_tracker.delete_range(response.deleted_range);
-                        self.format_tracker
-                            .push_range_adjustment(response.inserted_range);
-                    }
-                    TerminalOutput::Delete(num_chars) => {
-                        let deleted_buf_range = self
-                            .terminal_buffer
-                            .delete_forwards(&self.cursor_state.pos, num_chars);
-                        if let Some(range) = deleted_buf_range {
-                            self.format_tracker.delete_range(range);
-                        }
-                    }
-                    TerminalOutput::Sgr(sgr) => {
-                        // Should this be one big match ???????
-                        if let Some(color) = TerminalColor::from_sgr(sgr) {
-                            self.cursor_state.color = color;
-                        } else if sgr == SelectGraphicRendition::Reset {
-                            self.cursor_state.color = TerminalColor::Default;
-                            self.cursor_state.bold = false;
-                        } else if sgr == SelectGraphicRendition::Bold {
-                            self.cursor_state.bold = true;
-                        } else {
-                            warn!("Unhandled sgr: {:?}", sgr);
-                        }
-                    }
-                    TerminalOutput::SetMode(mode) => match mode {
-                        Mode::Decckm => {
-                            self.decckm_mode = true;
-                        }
-                        _ => {
-                            warn!("unhandled set mode: {mode:?}");
-                        }
-                    },
-                    TerminalOutput::InsertSpaces(num_spaces) => {
-                        let response = self
-                            .terminal_buffer
-                            .insert_spaces(&self.cursor_state.pos, num_spaces);
-                        self.format_tracker
-                            .push_range_adjustment(response.insertion_range);
-                    }
-                    TerminalOutput::ResetMode(mode) => match mode {
-                        Mode::Decckm => {
-                            self.decckm_mode = false;
-                        }
-                        _ => {
-                            warn!("unhandled set mode: {mode:?}");
-                        }
-                    },
-                    TerminalOutput::Invalid => {}
-                }
-            }
-        }
-
-        if let Err(e) = ret {
-            if e != Errno::EAGAIN {
-                error!("Failed to read from child process: {e}");
-            }
+            self.handle_incoming_data(incoming);
         }
     }
 
