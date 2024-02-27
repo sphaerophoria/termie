@@ -45,7 +45,7 @@ fn calc_segment_lengths(recording: &Recording) -> Vec<usize> {
     recording.items().iter().map(item_len).collect()
 }
 
-enum RecordingAction {
+pub enum RecordingAction {
     Write(u8),
     SetWinSize { width: usize, height: usize },
     None,
@@ -147,6 +147,35 @@ impl ReplayControl {
 
     pub fn len(&self) -> usize {
         self.total_len
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = RecordingAction> + '_ {
+        struct Iter<'b> {
+            tracker: RecordingTracker,
+            recording: &'b Recording,
+        }
+
+        impl Iterator for Iter<'_> {
+            type Item = RecordingAction;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                let action = self.tracker.next(self.recording);
+
+                if let RecordingAction::None = &action {
+                    return None;
+                }
+
+                Some(action)
+            }
+        }
+
+        Iter {
+            tracker: RecordingTracker {
+                item_idx: 0,
+                item_pos: 0,
+            },
+            recording: &self.recording,
+        }
     }
 
     pub fn next(&mut self) -> ControlAction {

@@ -8,7 +8,7 @@ use recording::{NotIntOfType, Recorder};
 pub use format_tracker::FormatTag;
 pub use io::{PtyIo, TermIo};
 pub use recording::{LoadRecordingError, Recording, RecordingHandle, SnapshotItem};
-pub use replay::{ControlAction, ReplayControl, ReplayIo};
+pub use replay::{ControlAction, RecordingAction, ReplayControl, ReplayIo};
 
 use crate::{error::backtraced_err, terminal_emulator::io::ReadResponse};
 use thiserror::Error;
