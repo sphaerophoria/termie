@@ -195,12 +195,12 @@ fn setup_fonts(ctx: &egui::Context) {
 
     fonts.font_data.insert(
         REGULAR_FONT_NAME.to_owned(),
-        FontData::from_static(include_bytes!("../res/Hack-Regular.ttf")),
+        FontData::from_static(include_bytes!("../../res/Hack-Regular.ttf")),
     );
 
     fonts.font_data.insert(
         BOLD_FONT_NAME.to_owned(),
-        FontData::from_static(include_bytes!("../res/Hack-Bold.ttf")),
+        FontData::from_static(include_bytes!("../../res/Hack-Bold.ttf")),
     );
 
     fonts
