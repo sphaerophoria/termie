@@ -561,6 +561,10 @@ impl TerminalBuffer {
         }
     }
 
+    pub fn get_win_size(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
     pub fn set_win_size(
         &mut self,
         width: usize,

@@ -7,18 +7,23 @@ use recording::{NotIntOfType, Recorder};
 
 pub use format_tracker::FormatTag;
 pub use io::{PtyIo, TermIo};
-pub use recording::{RecordingHandle, SnapshotItem};
+pub use recording::{LoadRecordingError, Recording, RecordingHandle, SnapshotItem};
+pub use replay::{ControlAction, ReplayControl, ReplayIo};
 
 use crate::{error::backtraced_err, terminal_emulator::io::ReadResponse};
 use thiserror::Error;
 
-use self::{io::CreatePtyIoError, recording::StartRecordingResponse};
+use self::{
+    io::CreatePtyIoError,
+    recording::{RecordingItem, StartRecordingResponse},
+};
 
 mod ansi;
 mod buffer;
 mod format_tracker;
 mod io;
 mod recording;
+mod replay;
 
 #[derive(Eq, PartialEq)]
 enum Mode {
@@ -448,7 +453,49 @@ impl TerminalEmulator<PtyIo> {
     }
 }
 
+impl TerminalEmulator<ReplayIo> {
+    pub fn from_snapshot(
+        snapshot: SnapshotItem,
+        io_handle: ReplayIo,
+    ) -> Result<TerminalEmulator<ReplayIo>, LoadSnapshotError> {
+        use LoadSnapshotErrorPriv::*;
+
+        let mut root = snapshot.into_map().map_err(|_| RootNotMap)?;
+        let parser = AnsiParser::from_snapshot(root.remove("parser").ok_or(ParserNotPresent)?)
+            .map_err(LoadParser)?;
+        let terminal_buffer =
+            TerminalBuffer::from_snapshot(root.remove("terminal_buffer").ok_or(BufferNotPresent)?)
+                .map_err(LoadBuffer)?;
+        let format_tracker = FormatTracker::from_snapshot(
+            root.remove("format_tracker")
+                .ok_or(FormatTrackerNotPresent)?,
+        )
+        .map_err(LoadFormatTracker)?;
+        let SnapshotItem::Bool(decckm_mode) = root.remove("decckm_mode").ok_or(DecckmNotPresent)?
+        else {
+            Err(DecckmNotBool)?
+        };
+        let cursor_state =
+            CursorState::from_snapshot(root.remove("cursor_state").ok_or(CursorStateNotPresent)?)
+                .map_err(LoadCursorState)?;
+
+        Ok(TerminalEmulator {
+            parser,
+            terminal_buffer,
+            format_tracker,
+            decckm_mode,
+            cursor_state,
+            recorder: Recorder::new("recordings".into()),
+            io: io_handle,
+        })
+    }
+}
+
 impl<Io: TermIo> TerminalEmulator<Io> {
+    pub fn get_win_size(&self) -> (usize, usize) {
+        self.terminal_buffer.get_win_size()
+    }
+
     pub fn set_win_size(
         &mut self,
         width_chars: usize,

@@ -9,6 +9,7 @@ mod terminal_emulator;
 
 struct Args {
     recording_path: PathBuf,
+    replay: Option<PathBuf>,
 }
 
 impl Args {
@@ -17,6 +18,7 @@ impl Args {
 
         // Default value
         let mut recording_path = "recordings".into();
+        let mut replay = None;
 
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -29,6 +31,7 @@ impl Args {
                         }
                     };
                 }
+                "--replay" => replay = it.next().map(PathBuf::from),
                 _ => {
                     println!("Invalid argument {arg}");
                     Self::help(program_name.as_deref())
@@ -36,7 +39,10 @@ impl Args {
             }
         }
 
-        Args { recording_path }
+        Args {
+            recording_path,
+            replay,
+        }
     }
 
     fn help(program_name: Option<&str>) -> ! {
@@ -48,6 +54,7 @@ impl Args {
                  \n\
                  Args:\n\
                  --recording-path: Optional, where to output recordings to
+                 --replay: Replay a recording
                  "
         );
         std::process::exit(1);
@@ -57,18 +64,22 @@ impl Args {
 fn main() {
     log::init();
     let args = Args::parse(std::env::args());
-    let res = match TerminalEmulator::new(args.recording_path) {
-        Ok(v) => gui::run(v),
-        Err(e) => {
-            error!(
-                "Failed to create terminal emulator: {}",
-                error::backtraced_err(&e)
-            );
-            return;
+    let res = if let Some(replay) = args.replay {
+        gui::run_replay(replay)
+    } else {
+        match TerminalEmulator::new(args.recording_path) {
+            Ok(v) => gui::run(v),
+            Err(e) => {
+                error!(
+                    "Failed to create terminal emulator: {}",
+                    error::backtraced_err(&e)
+                );
+                return;
+            }
         }
     };
 
     if let Err(e) = res {
-        error!("Failed to run gui: {}", error::backtraced_err(&e));
+        error!("Failed to run gui: {}", error::backtraced_err(&*e));
     }
 }

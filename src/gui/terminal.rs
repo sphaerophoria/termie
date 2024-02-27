@@ -424,20 +424,22 @@ impl TerminalWidget {
         }
     }
 
+    pub fn calculate_available_size(&self, ui: &mut Ui) -> (usize, usize) {
+        let character_size = get_char_size(ui.ctx(), self.font_size);
+        let width_chars = (ui.available_width() / character_size.0).floor() as usize;
+        let height_chars = (ui.available_height() / character_size.1).floor() as usize;
+        (width_chars, height_chars)
+    }
+
     pub fn show<Io: TermIo>(&mut self, ui: &mut Ui, terminal_emulator: &mut TerminalEmulator<Io>) {
         let character_size = get_char_size(ui.ctx(), self.font_size);
 
         terminal_emulator.read();
 
         let frame_response = egui::Frame::none().show(ui, |ui| {
-            let width_chars = (ui.available_width() / character_size.0).floor();
-            let height_chars = (ui.available_height() / character_size.1).floor();
-
-            if let Err(e) =
-                terminal_emulator.set_win_size(width_chars as usize, height_chars as usize)
-            {
-                error!("Failed to update window size: {}", backtraced_err(&*e));
-            }
+            let (width_chars, height_chars) = terminal_emulator.get_win_size();
+            let width_chars = width_chars as f32;
+            let height_chars = height_chars as f32;
 
             ui.set_width((width_chars + 0.5) * character_size.0);
             ui.set_height((height_chars + 0.5) * character_size.1);
