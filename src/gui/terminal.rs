@@ -7,7 +7,7 @@ use eframe::egui::{
     FontFamily, FontId, InputState, Key, Modifiers, Rect, TextFormat, TextStyle, Ui,
 };
 
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 const REGULAR_FONT_NAME: &str = "hack";
 const BOLD_FONT_NAME: &str = "hack-bold";
@@ -284,6 +284,7 @@ fn add_terminal_data_to_ui(
     data: &[u8],
     format_data: &[FormatTag],
     font_size: f32,
+    render_newlines: bool,
 ) -> Result<egui::Response, std::str::Utf8Error> {
     let (mut job, mut textformat) =
         create_terminal_output_layout_job(ui.style(), ui.available_width(), data)?;
@@ -326,7 +327,37 @@ fn add_terminal_data_to_ui(
         });
     }
 
-    Ok(ui.label(job))
+    let galley = ui.fonts(move |fonts| fonts.layout_job(job));
+    let label_response = ui.label(Arc::clone(&galley));
+    if render_newlines {
+        let painter = ui.painter();
+        let font = FontId {
+            size: font_size,
+            family: terminal_fonts.get_family(false),
+        };
+
+        for row in &galley.rows {
+            if row.ends_with_newline {
+                let ui_tl = label_response.rect.left_top() + row.rect.right_top().to_vec2();
+                painter.text(
+                    ui_tl,
+                    egui::Align2::LEFT_TOP,
+                    "\\n",
+                    font.clone(),
+                    ui.style().visuals.text_color(),
+                );
+            }
+        }
+    }
+
+    //  __________
+    // |asdf\n    |
+    // |asdlakdsjf|\n
+    // |          |
+    // |__________|
+    // asdf\nsdlfkjasdlfkjalsdkfjlasdkfj
+
+    Ok(label_response)
 }
 
 struct TerminalOutputRenderResponse {
@@ -338,6 +369,7 @@ fn render_terminal_output<Io: TermIo>(
     ui: &mut egui::Ui,
     terminal_emulator: &TerminalEmulator<Io>,
     font_size: f32,
+    show_newlines: bool,
 ) -> TerminalOutputRenderResponse {
     let terminal_data = terminal_emulator.data();
     let mut scrollback_data = terminal_data.scrollback;
@@ -374,12 +406,14 @@ fn render_terminal_output<Io: TermIo>(
                 scrollback_data,
                 &format_data.scrollback,
                 font_size,
+                show_newlines,
             ));
             let canvas_area = error_logged_rect(add_terminal_data_to_ui(
                 ui,
                 canvas_data,
                 &format_data.visible,
                 font_size,
+                show_newlines,
             ));
             TerminalOutputRenderResponse {
                 scrollback_area,
@@ -412,6 +446,7 @@ impl DebugRenderer {
 pub struct TerminalWidget {
     font_size: f32,
     debug_renderer: DebugRenderer,
+    show_newlines: bool,
 }
 
 impl TerminalWidget {
@@ -421,6 +456,7 @@ impl TerminalWidget {
         TerminalWidget {
             font_size: 12.0,
             debug_renderer: DebugRenderer::new(),
+            show_newlines: false,
         }
     }
 
@@ -448,7 +484,8 @@ impl TerminalWidget {
                 write_input_to_terminal(input_state, terminal_emulator);
             });
 
-            let output_response = render_terminal_output(ui, terminal_emulator, self.font_size);
+            let output_response =
+                render_terminal_output(ui, terminal_emulator, self.font_size, self.show_newlines);
             self.debug_renderer
                 .render(ui, output_response.canvas_area, Color32::BLUE);
 
@@ -473,5 +510,6 @@ impl TerminalWidget {
             ui.add(DragValue::new(&mut self.font_size).clamp_range(1.0..=100.0));
         });
         ui.checkbox(&mut self.debug_renderer.enable, "Debug render");
+        ui.checkbox(&mut self.show_newlines, "Show newlines");
     }
 }
