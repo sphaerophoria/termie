@@ -1,7 +1,7 @@
 use std::{fmt, num::TryFromIntError, path::PathBuf};
 
 use ansi::{AnsiParser, SelectGraphicRendition, TerminalOutput};
-use buffer::TerminalBuffer;
+use buffer::TerminalBuffer2;
 use format_tracker::FormatTracker;
 use recording::{NotIntOfType, Recorder};
 
@@ -364,7 +364,8 @@ impl TerminalColor {
     }
 }
 
-pub struct TerminalData<T> {
+#[derive(Debug)]
+pub struct TerminalData<T: std::fmt::Debug> {
     pub scrollback: T,
     pub visible: T,
 }
@@ -417,7 +418,7 @@ pub struct LoadSnapshotError(#[from] LoadSnapshotErrorPriv);
 
 pub struct TerminalEmulator<Io: TermIo> {
     parser: AnsiParser,
-    terminal_buffer: TerminalBuffer,
+    terminal_buffer: TerminalBuffer2,
     format_tracker: FormatTracker,
     cursor_state: CursorState,
     decckm_mode: bool,
@@ -438,7 +439,7 @@ impl TerminalEmulator<PtyIo> {
 
         let ret = TerminalEmulator {
             parser: AnsiParser::new(),
-            terminal_buffer: TerminalBuffer::new(TERMINAL_WIDTH, TERMINAL_HEIGHT),
+            terminal_buffer: TerminalBuffer2::new(TERMINAL_WIDTH, TERMINAL_HEIGHT),
             format_tracker: FormatTracker::new(),
             decckm_mode: false,
             cursor_state: CursorState {
@@ -464,7 +465,7 @@ impl TerminalEmulator<ReplayIo> {
         let parser = AnsiParser::from_snapshot(root.remove("parser").ok_or(ParserNotPresent)?)
             .map_err(LoadParser)?;
         let terminal_buffer =
-            TerminalBuffer::from_snapshot(root.remove("terminal_buffer").ok_or(BufferNotPresent)?)
+            TerminalBuffer2::from_snapshot(root.remove("terminal_buffer").ok_or(BufferNotPresent)?)
                 .map_err(LoadBuffer)?;
         let format_tracker = FormatTracker::from_snapshot(
             root.remove("format_tracker")
@@ -600,9 +601,6 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                 TerminalOutput::CarriageReturn => {
                     self.cursor_state.pos.x = 0;
                 }
-                TerminalOutput::Newline => {
-                    self.cursor_state.pos.y += 1;
-                }
                 TerminalOutput::Backspace => {
                     if self.cursor_state.pos.x >= 1 {
                         self.cursor_state.pos.x -= 1;
@@ -684,11 +682,13 @@ impl<Io: TermIo> TerminalEmulator<Io> {
         }
     }
 
-    pub fn data(&self) -> TerminalData<&[u8]> {
+    // FIXME: no mut
+    pub fn data(&mut self) -> TerminalData<Vec<u8>> {
         self.terminal_buffer.data()
     }
 
-    pub fn format_data(&self) -> TerminalData<Vec<FormatTag>> {
+    // FIXME: no mut
+    pub fn format_data(&mut self) -> TerminalData<Vec<FormatTag>> {
         let offset = self.terminal_buffer.data().scrollback.len();
         split_format_data_for_scrollback(self.format_tracker.tags(), offset)
     }

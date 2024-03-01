@@ -367,13 +367,14 @@ struct TerminalOutputRenderResponse {
 
 fn render_terminal_output<Io: TermIo>(
     ui: &mut egui::Ui,
-    terminal_emulator: &TerminalEmulator<Io>,
+    // FIXME: no mut
+    terminal_emulator: &mut TerminalEmulator<Io>,
     font_size: f32,
     show_newlines: bool,
 ) -> TerminalOutputRenderResponse {
     let terminal_data = terminal_emulator.data();
-    let mut scrollback_data = terminal_data.scrollback;
-    let mut canvas_data = terminal_data.visible;
+    let mut scrollback_data: &[u8] = &terminal_data.scrollback;
+    let mut canvas_data: &[u8] = &terminal_data.visible;
     let mut format_data = terminal_emulator.format_data();
 
     // Arguably incorrect. Scrollback does end with a newline, and that newline causes a blank
@@ -460,6 +461,7 @@ impl TerminalWidget {
         }
     }
 
+    #[allow(unused)]
     pub fn calculate_available_size(&self, ui: &mut Ui) -> (usize, usize) {
         let character_size = get_char_size(ui.ctx(), self.font_size);
         let width_chars = (ui.available_width() / character_size.0).floor() as usize;

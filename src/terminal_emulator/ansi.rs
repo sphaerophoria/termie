@@ -63,7 +63,6 @@ pub enum TerminalOutput {
     ClearAll,
     CarriageReturn,
     ClearLineForwards,
-    Newline,
     Backspace,
     InsertLines(usize),
     Delete(usize),
@@ -443,11 +442,11 @@ impl AnsiParser {
                         continue;
                     }
 
-                    if *b == b'\n' {
-                        push_data_if_non_empty(&mut data_output, &mut output);
-                        output.push(TerminalOutput::Newline);
-                        continue;
-                    }
+                    //if *b == b'\n' {
+                    //    push_data_if_non_empty(&mut data_output, &mut output);
+                    //    output.push(TerminalOutput::Newline);
+                    //    continue;
+                    //}
 
                     if *b == 0x08 {
                         push_data_if_non_empty(&mut data_output, &mut output);

@@ -237,14 +237,14 @@ impl TermieGui {
 impl eframe::App for TermieGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let panel_response = CentralPanel::default().show(ctx, |ui| {
-            let (width_chars, height_chars) = self.terminal_widget.calculate_available_size(ui);
+            //let (width_chars, height_chars) = self.terminal_widget.calculate_available_size(ui);
 
-            if let Err(e) = self
-                .terminal_emulator
-                .set_win_size(width_chars, height_chars)
-            {
-                error!("failed to set window size {}", backtraced_err(&*e));
-            }
+            //if let Err(e) = self
+            //    .terminal_emulator
+            //    .set_win_size(width_chars, height_chars)
+            //{
+            //    error!("failed to set window size {}", backtraced_err(&*e));
+            //}
 
             self.terminal_widget.show(ui, &mut self.terminal_emulator);
         });
