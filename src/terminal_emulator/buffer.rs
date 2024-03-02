@@ -141,6 +141,16 @@ impl Line<'_> {
     }
 }
 
+mod visible_buffer_keys {
+    pub const BUF: &str = "buf";
+    pub const LENGTH_OFFSET: &str = "length_offset";
+    pub const NEWLINE_OFFSET: &str = "newline_offset";
+    pub const WIDTH: &str = "width";
+    pub const HEIGHT: &str = "height";
+    pub const FIRST_LINE_IDX: &str = "first_line_idx";
+}
+
+#[derive(PartialEq, Debug)]
 struct VisibleBuffer {
     buf: Box<[u8]>,
     length_offset: usize,
@@ -250,8 +260,66 @@ impl VisibleBuffer {
         line.clear();
         line
     }
+
+    fn from_snapshot(snapshot: SnapshotItem) -> VisibleBuffer {
+        use visible_buffer_keys::*;
+        let mut root = snapshot.into_map().unwrap();
+
+        let buf: Vec<u8> = root
+            .remove(BUF)
+            .unwrap()
+            .into_vec()
+            .unwrap()
+            .into_iter()
+            .map(|item| item.into_num::<u8>().unwrap())
+            .collect();
+        let buf: Box<[u8]> = buf.into();
+
+        let mut as_usize = move |key| root.remove(key).unwrap().into_num::<usize>().unwrap();
+
+        let length_offset = as_usize(LENGTH_OFFSET);
+        let newline_offset = as_usize(NEWLINE_OFFSET);
+        let width = as_usize(WIDTH);
+        let height = as_usize(HEIGHT);
+        let first_line_idx = as_usize(FIRST_LINE_IDX);
+
+        VisibleBuffer {
+            buf,
+            length_offset,
+            newline_offset,
+            width,
+            height,
+            first_line_idx,
+        }
+    }
+
+    fn snapshot(&self) -> SnapshotItem {
+        use visible_buffer_keys::*;
+        let length_offset: i64 = self.length_offset.try_into().unwrap();
+        let newline_offset: i64 = self.newline_offset.try_into().unwrap();
+        let width: i64 = self.width.try_into().unwrap();
+        let height: i64 = self.height.try_into().unwrap();
+        let first_line_idx: i64 = self.first_line_idx.try_into().unwrap();
+        SnapshotItem::Map(
+            [
+                (BUF.to_string(), self.buf.iter().collect()),
+                (LENGTH_OFFSET.to_string(), length_offset.into()),
+                (NEWLINE_OFFSET.to_string(), newline_offset.into()),
+                (WIDTH.to_string(), width.into()),
+                (HEIGHT.to_string(), height.into()),
+                (FIRST_LINE_IDX.to_string(), first_line_idx.into()),
+            ]
+            .into(),
+        )
+    }
 }
 
+mod terminal_buffer_keys {
+    pub const VISIBLE_BUF: &str = "visible_buf";
+    pub const SCROLLBACK: &str = "scrollback";
+}
+
+#[derive(PartialEq, Debug)]
 pub struct TerminalBuffer2 {
     visible_buf: VisibleBuffer,
     scrollback: Vec<u8>,
@@ -299,12 +367,40 @@ impl TerminalBuffer2 {
         ret
     }
 
-    pub fn from_snapshot(_snapshot: SnapshotItem) -> Result<TerminalBuffer2, LoadSnapshotError> {
-        unimplemented!();
+    pub fn from_snapshot(snapshot: SnapshotItem) -> Result<TerminalBuffer2, LoadSnapshotError> {
+        use terminal_buffer_keys::*;
+
+        let mut root = snapshot.into_map().unwrap();
+        let visible_buf = root.remove(VISIBLE_BUF).unwrap();
+        let visible_buf = VisibleBuffer::from_snapshot(visible_buf);
+
+        let scrollback = root.remove(SCROLLBACK).unwrap();
+        let scrollback: Vec<u8> = scrollback
+            .into_vec()
+            .unwrap()
+            .into_iter()
+            .map(|item| item.into_num::<u8>().unwrap())
+            .collect();
+
+        Ok(TerminalBuffer2 {
+            scrollback,
+            visible_buf,
+        })
     }
 
     pub fn snapshot(&self) -> Result<SnapshotItem, CreateSnapshotError> {
-        unimplemented!();
+        pub use terminal_buffer_keys::*;
+        let ret = SnapshotItem::Map(
+            [
+                (
+                    SCROLLBACK.to_string(),
+                    self.scrollback.clone().into_iter().collect(),
+                ),
+                (VISIBLE_BUF.to_string(), self.visible_buf.snapshot()),
+            ]
+            .into(),
+        );
+        Ok(ret)
     }
 
     fn push_line_to_scrollback(&mut self) -> Line<'_> {
@@ -770,17 +866,17 @@ mod test {
         //assert_eq!(response.deleted_range, 17..22);
         //assert_eq!(response.inserted_range, 11..12);
     }
-    //
-    //    #[test]
-    //    fn test_buffer_snapshot() {
-    //        let buf = TerminalBuffer {
-    //            buf: vec![1, 5, 9, 11],
-    //            width: 342,
-    //            height: 9999,
-    //        };
-    //
-    //        let snapshot = buf.snapshot().expect("failed to snapshot");
-    //        let loaded = TerminalBuffer2::from_snapshot(snapshot).expect("failed to load snapshot");
-    //        assert_eq!(buf, loaded);
-    //    }
+
+    #[test]
+    fn test_buffer_snapshot() {
+        let mut terminal_buffer = TerminalBuffer2::new(5, 3);
+        terminal_buffer.insert_data(
+            &CursorPos { x: 2, y: 1 },
+            b"hello world\n asdf asdf\n wrap and stuff",
+        );
+
+        let snapshot = terminal_buffer.snapshot().expect("failed to snapshot");
+        let loaded = TerminalBuffer2::from_snapshot(snapshot).expect("failed to load snapshot");
+        assert_eq!(terminal_buffer, loaded);
+    }
 }
