@@ -2,6 +2,7 @@ use std::alloc::{self, Layout};
 use std::ops::Range;
 use thiserror::Error;
 
+use super::TerminalData2;
 use super::{recording::SnapshotItem, CursorPos, TerminalData};
 
 fn align_to_size(val: usize, alignment: usize) -> usize {
@@ -38,6 +39,26 @@ pub struct TerminalBufferInsertLineResponse {
 pub struct TerminalBufferSetWinSizeResponse {
     pub changed: bool,
     pub insertion_range: Range<usize>,
+    pub new_cursor_pos: CursorPos,
+}
+
+/// All indexes are assumed to be y * width + x
+// FIXME: Put an example
+pub struct TerminalBufferModification {
+    // 100
+    // 1000
+    //
+    // [0..900] [a..b]
+    // [0..100]
+    //
+    //
+    // Range of bytes in visible were removed and put into range in scrollback
+    // note that if more was written than can fit in the visible section, it will look like we
+    // moved more than is possible
+    pub visible_to_scrollback: (Range<usize>, Range<usize>),
+    // Where in the buffer we wrote after range adjustment. What are the indexes _right now_
+    pub written_range: Range<usize>,
+    // Where is the cursor after this modification
     pub new_cursor_pos: CursorPos,
 }
 
@@ -141,6 +162,12 @@ impl Line<'_> {
     }
 }
 
+struct VisibleBufferSerializeResponse {
+    data: Vec<u8>,
+    /// Line id -> range in data
+    line_mappings: Vec<Range<usize>>
+}
+
 mod visible_buffer_keys {
     pub const BUF: &str = "buf";
     pub const LENGTH_OFFSET: &str = "length_offset";
@@ -196,6 +223,54 @@ impl VisibleBuffer {
                 ret.get_line(y).clear();
             }
             ret
+        }
+    }
+
+    fn serialize(&mut self) -> VisibleBufferSerializeResponse {
+        let mut data = Vec::new();
+        let width = self.width;
+        let lines = self.get_all_lines();
+        let mut line_mappings = Vec::new();
+        let last_line_with_content = lines
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_i, l)| *l.len > 0)
+            .map(|(i, _l)| i)
+            .unwrap_or(0);
+
+        let mut line_start = 0;
+        for y in 0..last_line_with_content {
+            // FIXME: factor out
+            let line = &lines[y];
+
+            let next_line_is_empty_line = || lines.get(y + 1).map(|x| *x.len == 0).unwrap_or(false);
+
+            data.extend(line.serialize());
+            if *line.newline || *line.len < width || next_line_is_empty_line() {
+                data.push(b'\n');
+            }
+
+            line_mappings.push(line_start..data.len());
+            line_start = data.len();
+        }
+
+        data.extend(lines[last_line_with_content].serialize());
+        line_mappings.push(line_start..data.len());
+
+        for _ in last_line_with_content + 1..self.height {
+            line_mappings.push(data.len()..data.len());
+        }
+
+        if !data.is_empty() {
+            // Last line always ends in \n
+            data.push(b'\n');
+        }
+
+        VisibleBufferSerializeResponse {
+            data,
+            line_mappings,
+
         }
     }
 
@@ -334,39 +409,6 @@ impl TerminalBuffer2 {
         }
     }
 
-    fn serialize_visible(&mut self) -> Vec<u8> {
-        let mut ret = Vec::new();
-        let width = self.visible_buf.width;
-        let lines = self.visible_buf.get_all_lines();
-        let last_line_with_content = lines
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_i, l)| *l.len > 0)
-            .map(|(i, _l)| i)
-            .unwrap_or(0);
-
-        for y in 0..last_line_with_content {
-            // FIXME: factor out
-            let line = &lines[y];
-
-            let next_line_is_empty_line = || lines.get(y + 1).map(|x| *x.len == 0).unwrap_or(false);
-
-            ret.extend(line.serialize());
-            if *line.newline || *line.len < width || next_line_is_empty_line() {
-                ret.push(b'\n');
-            }
-        }
-        ret.extend(lines[last_line_with_content].serialize());
-
-        if !ret.is_empty() {
-            // Last line always ends in \n
-            ret.push(b'\n');
-        }
-
-        ret
-    }
-
     pub fn from_snapshot(snapshot: SnapshotItem) -> Result<TerminalBuffer2, LoadSnapshotError> {
         use terminal_buffer_keys::*;
 
@@ -417,12 +459,22 @@ impl TerminalBuffer2 {
         &mut self,
         cursor_pos: &CursorPos,
         mut data: &[u8],
-    ) -> TerminalBufferInsertResponse {
+    ) -> TerminalBufferModification {
         let mut x = cursor_pos.x;
         let mut y = cursor_pos.y;
         let max_y_idx = self.visible_buf.height - 1;
         println!("{:?}", std::str::from_utf8(data));
         assert!(y <= max_y_idx);
+
+        let mut scrollback_end = self.scrollback.len();
+        let mut num_evicted_lines = 0;
+
+        let write_start = if data.starts_with(b"\n") {
+            // FIXME: absolute hack
+             (y + 1) * self.visible_buf.width + x
+        } else {
+            y * self.visible_buf.width + x
+        };
 
         loop {
             if data.is_empty() {
@@ -441,14 +493,38 @@ impl TerminalBuffer2 {
 
             if y > max_y_idx {
                 self.push_line_to_scrollback();
+                num_evicted_lines += 1;
                 y = max_y_idx;
             }
             data = &data[response.consumed..];
         }
 
-        TerminalBufferInsertResponse {
-            written_range: 0..0,
-            insertion_range: 0..0,
+        // [asdf]
+        // [1234]
+        // []
+        // []
+        //
+        // []
+        // []
+
+        // [0..4] red
+        // [4..8] green
+        //
+        // Format tracker
+        // [0..8] yellow
+
+        let num_evicted_bytes = num_evicted_lines * self.visible_buf.width;
+        let write_start = if num_evicted_bytes > write_start {
+            0
+        } else {
+            write_start - num_evicted_bytes
+        };
+
+        let write_end = y * self.visible_buf.width + x;
+
+        TerminalBufferModification {
+            visible_to_scrollback: (0..num_evicted_bytes, scrollback_end..self.scrollback.len()),
+            written_range: write_start..write_end,
             new_cursor_pos: CursorPos { x, y },
         }
     }
@@ -558,13 +634,14 @@ impl TerminalBuffer2 {
     }
 
     // FIXME: no mut
-    pub fn data(&mut self) -> TerminalData<Vec<u8>> {
-        let visible = self.serialize_visible();
+    pub fn data(&mut self) -> TerminalData2  {
+        let VisibleBufferSerializeResponse { data, line_mappings } = self.visible_buf.serialize();
         let scrollback = self.scrollback.clone();
         //println!("scrollback: {:?}", scrollback);
-        TerminalData {
+        TerminalData2 {
             scrollback,
-            visible,
+            visible: data,
+            line_mappings,
         }
     }
 
@@ -574,11 +651,45 @@ impl TerminalBuffer2 {
 
     pub fn set_win_size(
         &mut self,
-        _width: usize,
-        _height: usize,
-        _cursor_pos: &CursorPos,
+        width: usize,
+        height: usize,
+        cursor_pos: &CursorPos,
     ) -> TerminalBufferSetWinSizeResponse {
-        unimplemented!();
+        if self.visible_buf.width == width && self.visible_buf.height == height {
+            return TerminalBufferSetWinSizeResponse {
+                changed: false,
+                insertion_range: 0..0,
+                new_cursor_pos: cursor_pos.clone()
+            }
+        }
+
+        let mut old_visible_buf = std::mem::replace(&mut self.visible_buf, VisibleBuffer::new(width, height));
+        let old_lines = old_visible_buf.get_all_lines();
+
+        let mut pos = CursorPos { x: 0, y: 0 };
+        let mut new_cursor_pos = pos.clone();
+        for (i, line) in old_lines.into_iter().enumerate() {
+            // FIXME: pos, cursor_pos naming is confusing
+            if i == cursor_pos.y {
+
+                let serialized = line.serialize();
+                // FIXME: out of bounds handling
+                new_cursor_pos = self.insert_data(&pos, &serialized[..cursor_pos.x]).new_cursor_pos;
+                pos = self.insert_data(&pos, &serialized[cursor_pos.x..]).new_cursor_pos;
+            } else {
+                pos = self.insert_data(&pos, line.serialize()).new_cursor_pos;
+            }
+
+            if *line.newline {
+                pos = self.insert_data(&pos, b"\n").new_cursor_pos;
+            }
+        }
+
+        TerminalBufferSetWinSizeResponse {
+            changed: true,
+            insertion_range: 0..0,
+            new_cursor_pos,
+        }
     }
 }
 
@@ -878,5 +989,53 @@ mod test {
         let snapshot = terminal_buffer.snapshot().expect("failed to snapshot");
         let loaded = TerminalBuffer2::from_snapshot(snapshot).expect("failed to load snapshot");
         assert_eq!(terminal_buffer, loaded);
+    }
+
+    #[test]
+    fn test_insertion_response() {
+        let mut terminal_buffer = TerminalBuffer2::new(5, 5);
+        let response = terminal_buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"asdf");
+        assert!(response.visible_to_scrollback.0.is_empty());
+        assert!(response.visible_to_scrollback.1.is_empty());
+        assert_eq!(response.written_range, 0..4);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 4, y: 0 });
+
+        // insertion at x 3, y 2, NOTE: no eviction
+        let response = terminal_buffer.insert_data(&CursorPos { x: 3, y: 2 }, b"asdf");
+        assert!(response.visible_to_scrollback.0.is_empty());
+        assert!(response.visible_to_scrollback.1.is_empty());
+        assert_eq!(response.written_range, 13..17);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 2, y: 3 });
+    }
+
+    #[test]
+    fn test_insertion_response_too_much_data() {
+        let mut terminal_buffer = TerminalBuffer2::new(5, 5);
+        let response = terminal_buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"0123401234012340123401234abcdeabc");
+        println!("{:?}", std::str::from_utf8(&terminal_buffer.data().scrollback));
+        println!("{:?}", std::str::from_utf8(&terminal_buffer.data().visible));
+
+        assert_eq!(response.visible_to_scrollback, (0..10, 0..10));
+        assert_eq!(response.written_range, 0..23);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 3, y: 4 });
+
+        let mut terminal_buffer = TerminalBuffer2::new(5, 5);
+        let response = terminal_buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"01234\n01234\n01234\n01234\n01234\nabcde\nabc");
+        // Scrollback has 2 extra bytes, for 2 extra newlines
+        assert_eq!(response.visible_to_scrollback, (0..10, 0..12));
+        assert_eq!(response.written_range, 0..23);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 3, y: 4 });
+    }
+
+    #[test]
+    fn test_insertion_response_some_evicted() {
+        let mut terminal_buffer = TerminalBuffer2::new(5, 5);
+        let response = terminal_buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"as\n");
+        let response = terminal_buffer.insert_data(&response.new_cursor_pos, b"01234\n01234\n01234\n01234\n0123");
+        println!("visible: {:?}", std::str::from_utf8(&terminal_buffer.data().visible));
+        println!("scrollback: {:?}", std::str::from_utf8(&terminal_buffer.data().scrollback));
+        assert_eq!(response.visible_to_scrollback, (0..5, 0..3));
+        assert_eq!(response.written_range, (0..24));
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 4, y: 4 });
     }
 }

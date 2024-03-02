@@ -1,4 +1,4 @@
-use std::{fmt, num::TryFromIntError, path::PathBuf};
+use std::{fmt, num::TryFromIntError, path::PathBuf, ops::Range};
 
 use ansi::{AnsiParser, SelectGraphicRendition, TerminalOutput};
 use buffer::TerminalBuffer2;
@@ -364,6 +364,15 @@ impl TerminalColor {
     }
 }
 
+// FIXME: god awful name
+pub struct TerminalData2 {
+    // FIXME: slice?
+    pub scrollback: Vec<u8>,
+    pub visible: Vec<u8>,
+    // Maybe indicative of bad abstraction
+    pub line_mappings: Vec<Range<usize>>,
+}
+
 #[derive(Debug)]
 pub struct TerminalData<T: std::fmt::Debug> {
     pub scrollback: T,
@@ -541,8 +550,9 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     let response = self
                         .terminal_buffer
                         .insert_data(&self.cursor_state.pos, &data);
+                    // FIXME: Not complete
                     self.format_tracker
-                        .push_range_adjustment(response.insertion_range);
+                        .delete_range(response.visible_to_scrollback.0);
                     self.format_tracker
                         .push_range(&self.cursor_state, response.written_range);
                     self.cursor_state.pos = response.new_cursor_pos;
@@ -581,8 +591,8 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     if let Some(buf_pos) =
                         self.terminal_buffer.clear_forwards(&self.cursor_state.pos)
                     {
-                        self.format_tracker
-                            .push_range(&self.cursor_state, buf_pos..usize::MAX);
+                        //self.format_tracker
+                        //    .push_range(&self.cursor_state, buf_pos..usize::MAX);
                     }
                 }
                 TerminalOutput::ClearAll => {
@@ -595,7 +605,7 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                         .terminal_buffer
                         .clear_line_forwards(&self.cursor_state.pos)
                     {
-                        self.format_tracker.delete_range(range);
+                        //self.format_tracker.delete_range(range);
                     }
                 }
                 TerminalOutput::CarriageReturn => {
@@ -610,17 +620,17 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     let response = self
                         .terminal_buffer
                         .insert_lines(&self.cursor_state.pos, num_lines);
-                    self.format_tracker.delete_range(response.deleted_range);
-                    self.format_tracker
-                        .push_range_adjustment(response.inserted_range);
+                    //self.format_tracker.delete_range(response.deleted_range);
+                    //self.format_tracker
+                    //    .push_range_adjustment(response.inserted_range);
                 }
                 TerminalOutput::Delete(num_chars) => {
                     let deleted_buf_range = self
                         .terminal_buffer
                         .delete_forwards(&self.cursor_state.pos, num_chars);
-                    if let Some(range) = deleted_buf_range {
-                        self.format_tracker.delete_range(range);
-                    }
+                    //if let Some(range) = deleted_buf_range {
+                    //    self.format_tracker.delete_range(range);
+                    //}
                 }
                 TerminalOutput::Sgr(sgr) => {
                     // Should this be one big match ???????
@@ -647,8 +657,8 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     let response = self
                         .terminal_buffer
                         .insert_spaces(&self.cursor_state.pos, num_spaces);
-                    self.format_tracker
-                        .push_range_adjustment(response.insertion_range);
+                    //self.format_tracker
+                    //    .push_range_adjustment(response.insertion_range);
                 }
                 TerminalOutput::ResetMode(mode) => match mode {
                     Mode::Decckm => {
@@ -684,13 +694,50 @@ impl<Io: TermIo> TerminalEmulator<Io> {
 
     // FIXME: no mut
     pub fn data(&mut self) -> TerminalData<Vec<u8>> {
-        self.terminal_buffer.data()
+        let data = self.terminal_buffer.data();
+        TerminalData {
+            scrollback: data.scrollback,
+            visible: data.visible,
+        }
     }
 
     // FIXME: no mut
     pub fn format_data(&mut self) -> TerminalData<Vec<FormatTag>> {
-        let offset = self.terminal_buffer.data().scrollback.len();
-        split_format_data_for_scrollback(self.format_tracker.tags(), offset)
+        let (width, height) = self.get_win_size();
+        let mut output_tags = Vec::new();
+        // FIXME: serializing twice just to get format data
+        let data = self.terminal_buffer.data();
+        //let offset = self.terminal_buffer.data().scrollback.len();
+        //split_format_data_for_scrollback(self.format_tracker.tags(), offset)
+        println!("{:?}", data.line_mappings);
+        let map_input_to_output = move |idx: usize| {
+            println!("line mapping: {:?}", idx);
+            if idx == usize::MAX {
+                return idx
+            }
+            let line_for_idx = idx / width;
+            let pos_in_line = idx % width;
+            data.line_mappings[line_for_idx].start + pos_in_line
+        };
+
+        let input_tags = self.format_tracker.tags();
+        println!("input_tags: {:?}", input_tags);
+        for input_tag in input_tags {
+            let start = map_input_to_output(input_tag.start);
+            let end = map_input_to_output(input_tag.end);
+
+            let mut output_tag = input_tag.clone();
+            output_tag.start = start;
+            output_tag.end = end;
+
+            output_tags.push(output_tag)
+        }
+
+        println!("output_tags: {:?}", output_tags);
+        TerminalData {
+            scrollback: Vec::new(),
+            visible: output_tags,
+        }
     }
 
     pub fn cursor_pos(&self) -> CursorPos {
