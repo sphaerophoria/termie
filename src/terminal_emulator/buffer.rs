@@ -371,8 +371,7 @@ impl VisibleBuffer {
         let buf: Box<[u8]> = buf.map_err(|_| BufElemNotu8)?.into();
 
         let mut as_usize = move |key| -> Result<usize, LoadSnapshotErrorKind> {
-            root
-                .remove(key)
+            root.remove(key)
                 .ok_or(ElemNotPresent(key))?
                 .into_num::<usize>()
                 .map_err(|_| ElemNotUsize(key))
@@ -437,8 +436,8 @@ impl TerminalBuffer2 {
     }
 
     pub fn from_snapshot(snapshot: SnapshotItem) -> Result<TerminalBuffer2, LoadSnapshotError> {
-        use LoadSnapshotErrorKind::*;
         use terminal_buffer_keys::*;
+        use LoadSnapshotErrorKind::*;
 
         let mut root = snapshot.into_map().map_err(|_| RootNotMap)?;
         let visible_buf = root.remove(VISIBLE_BUF).ok_or(VisibleBufNotPresent)?;
@@ -446,7 +445,10 @@ impl TerminalBuffer2 {
 
         let scrollback = root.remove(SCROLLBACK).ok_or(ScrollbackNotPresent)?;
         let scrollback = scrollback.into_vec().map_err(|_| ScrollbackNotArray)?;
-        let scrollback: Result<Vec<_>, _> = scrollback.into_iter().map(|item| item.into_num::<u8>()).collect();
+        let scrollback: Result<Vec<_>, _> = scrollback
+            .into_iter()
+            .map(|item| item.into_num::<u8>())
+            .collect();
         let scrollback = scrollback.map_err(|_| ScrollbackElemNotu8)?;
 
         Ok(TerminalBuffer2 {

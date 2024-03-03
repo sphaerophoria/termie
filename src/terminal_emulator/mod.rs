@@ -124,7 +124,6 @@ impl TerminalInput {
     }
 }
 
-
 #[derive(Debug, Error)]
 enum SnapshotCursorPosErrorPriv {
     #[error("x pos cannot be cast to i64")]
