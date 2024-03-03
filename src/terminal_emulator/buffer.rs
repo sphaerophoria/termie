@@ -42,15 +42,32 @@ pub struct TerminalBufferSetWinSizeResponse {
     pub new_cursor_pos: CursorPos,
 }
 
+// Cursor pos <-- visible location
+#[derive(Debug, PartialEq)]
+pub struct BufPos {
+    /// Line id refers to a line at the time of writing in the visible buffer
+    /// Once the line is in scrollback, we could have 1 "line" split over multiple visible lines,
+    /// or 1 visible line containing multiple line ids
+    /// This is because of resize... at any given time the visible buffer will have a one to one
+    /// mapping
+    /// This allows us to have a constant id for a character across visible and scrollback areas
+    line_id: usize,
+    x_pos: usize,
+}
+
+impl BufPos {
+    fn new(x_pos: usize, line_id: usize) -> BufPos {
+        BufPos {
+            x_pos, line_id,
+        }
+    }
+}
+
 /// All indexes are assumed to be y * width + x
 // FIXME: Put an example
 pub struct TerminalBufferModification {
-    // Range of bytes in visible were removed and put into range in scrollback
-    // note that if more was written than can fit in the visible section, it will look like we
-    // moved more than is possible
-    pub visible_to_scrollback: (Range<usize>, Range<usize>),
     // Where in the buffer we wrote after range adjustment. What are the indexes _right now_
-    pub written_range: Range<usize>,
+    pub written_range: Range<BufPos>,
     // Where is the cursor after this modification
     pub new_cursor_pos: CursorPos,
 }
@@ -417,12 +434,22 @@ impl VisibleBuffer {
 
 mod terminal_buffer_keys {
     pub const VISIBLE_BUF: &str = "visible_buf";
+    pub const SCROLLBACK_LINE_POS: &str = "scrollback_line_pos";
     pub const SCROLLBACK: &str = "scrollback";
 }
+
+
+// scrollback positions
+// Vec<usize> line id -> buf pos
+//
+// visible positions
+// current_start_id + line offset
 
 #[derive(PartialEq, Debug)]
 pub struct TerminalBuffer2 {
     visible_buf: VisibleBuffer,
+    // Mapping of line id to buffer pos. E.g. line id 4 -> buf pos by scrollback_line_positions[4]
+    scrollback_line_positions: Vec<usize>,
     scrollback: Vec<u8>,
 }
 
@@ -431,6 +458,7 @@ impl TerminalBuffer2 {
         let visible_buf = VisibleBuffer::new(width, height);
         TerminalBuffer2 {
             visible_buf,
+            scrollback_line_positions: Vec::new(),
             scrollback: Vec::new(),
         }
     }
@@ -451,20 +479,31 @@ impl TerminalBuffer2 {
             .collect();
         let scrollback = scrollback.map_err(|_| ScrollbackElemNotu8)?;
 
+        let scrollback_line_positions = root.remove(SCROLLBACK_LINE_POS).unwrap();
+        let scrollback_line_positions = scrollback_line_positions.into_vec().unwrap();
+        let scrollback_line_positions = scrollback_line_positions.into_iter().map(|x| x.into_num().unwrap()).collect();
+
+
         Ok(TerminalBuffer2 {
             scrollback,
+            scrollback_line_positions,
             visible_buf,
         })
     }
 
     pub fn snapshot(&self) -> Result<SnapshotItem, CreateSnapshotError> {
         pub use terminal_buffer_keys::*;
+        let scrollback_line_positions_i64: Vec<SnapshotItem> = self.scrollback_line_positions.iter().map(|x| {
+            let x: i64 = (*x).try_into().unwrap();
+            SnapshotItem::Int(x)
+        }).collect();
         let ret = SnapshotItem::Map(
             [
                 (
                     SCROLLBACK.to_string(),
                     self.scrollback.clone().into_iter().collect(),
                 ),
+                (SCROLLBACK_LINE_POS.to_string(), SnapshotItem::Array(scrollback_line_positions_i64)),
                 (VISIBLE_BUF.to_string(), self.visible_buf.snapshot()?),
             ]
             .into(),
@@ -474,12 +513,22 @@ impl TerminalBuffer2 {
 
     fn push_line_to_scrollback(&mut self) -> Line<'_> {
         let line_to_evict = self.visible_buf.get_line(0);
+        self.scrollback_line_positions.push(self.scrollback.len());
         self.scrollback.extend(line_to_evict.serialize());
         if *line_to_evict.newline {
             println!("setting newline");
             self.scrollback.push(b'\n');
         }
         self.visible_buf.push_line()
+    }
+
+    fn cursor_to_buf_pos(&self, cursor_pos: &CursorPos) -> BufPos {
+        let line_id = self.scrollback_line_positions.len() + cursor_pos.y;
+        let x_pos = cursor_pos.x;
+
+        BufPos {
+            line_id, x_pos
+        }
     }
 
     pub fn insert_data(
@@ -493,15 +542,7 @@ impl TerminalBuffer2 {
         println!("{:?}", std::str::from_utf8(data));
         assert!(y <= max_y_idx);
 
-        let scrollback_end = self.scrollback.len();
-        let mut num_evicted_lines = 0;
-
-        let write_start = if data.starts_with(b"\n") {
-            // FIXME: absolute hack
-            (y + 1) * self.visible_buf.width + x
-        } else {
-            y * self.visible_buf.width + x
-        };
+        let write_start = self.cursor_to_buf_pos(cursor_pos);
 
         loop {
             if data.is_empty() {
@@ -520,37 +561,15 @@ impl TerminalBuffer2 {
 
             if y > max_y_idx {
                 self.push_line_to_scrollback();
-                num_evicted_lines += 1;
                 y = max_y_idx;
             }
             data = &data[response.consumed..];
         }
 
-        // [asdf]
-        // [1234]
-        // []
-        // []
-        //
-        // []
-        // []
-
-        // [0..4] red
-        // [4..8] green
-        //
-        // Format tracker
-        // [0..8] yellow
-
-        let num_evicted_bytes = num_evicted_lines * self.visible_buf.width;
-        let write_start = if num_evicted_bytes > write_start {
-            0
-        } else {
-            write_start - num_evicted_bytes
-        };
-
-        let write_end = y * self.visible_buf.width + x;
+        let new_cursor_pos = CursorPos { x, y };
+        let write_end = self.cursor_to_buf_pos(&new_cursor_pos);
 
         TerminalBufferModification {
-            visible_to_scrollback: (0..num_evicted_bytes, scrollback_end..self.scrollback.len()),
             written_range: write_start..write_end,
             new_cursor_pos: CursorPos { x, y },
         }
@@ -1028,16 +1047,12 @@ mod test {
     fn test_insertion_response() {
         let mut terminal_buffer = TerminalBuffer2::new(5, 5);
         let response = terminal_buffer.insert_data(&CursorPos { x: 0, y: 0 }, b"asdf");
-        assert!(response.visible_to_scrollback.0.is_empty());
-        assert!(response.visible_to_scrollback.1.is_empty());
-        assert_eq!(response.written_range, 0..4);
+        assert_eq!(response.written_range, BufPos::new(0, 0)..BufPos::new(4, 0));
         assert_eq!(response.new_cursor_pos, CursorPos { x: 4, y: 0 });
 
         // insertion at x 3, y 2, NOTE: no eviction
         let response = terminal_buffer.insert_data(&CursorPos { x: 3, y: 2 }, b"asdf");
-        assert!(response.visible_to_scrollback.0.is_empty());
-        assert!(response.visible_to_scrollback.1.is_empty());
-        assert_eq!(response.written_range, 13..17);
+        assert_eq!(response.written_range, BufPos::new(3, 2)..BufPos::new(2, 3));
         assert_eq!(response.new_cursor_pos, CursorPos { x: 2, y: 3 });
     }
 
@@ -1048,14 +1063,8 @@ mod test {
             &CursorPos { x: 0, y: 0 },
             b"0123401234012340123401234abcdeabc",
         );
-        println!(
-            "{:?}",
-            std::str::from_utf8(&terminal_buffer.data().scrollback)
-        );
-        println!("{:?}", std::str::from_utf8(&terminal_buffer.data().visible));
 
-        assert_eq!(response.visible_to_scrollback, (0..10, 0..10));
-        assert_eq!(response.written_range, 0..23);
+        assert_eq!(response.written_range, BufPos::new(0, 0)..BufPos::new(3, 6));
         assert_eq!(response.new_cursor_pos, CursorPos { x: 3, y: 4 });
 
         let mut terminal_buffer = TerminalBuffer2::new(5, 5);
@@ -1063,9 +1072,7 @@ mod test {
             &CursorPos { x: 0, y: 0 },
             b"01234\n01234\n01234\n01234\n01234\nabcde\nabc",
         );
-        // Scrollback has 2 extra bytes, for 2 extra newlines
-        assert_eq!(response.visible_to_scrollback, (0..10, 0..12));
-        assert_eq!(response.written_range, 0..23);
+        assert_eq!(response.written_range, BufPos::new(0, 0)..BufPos::new(3, 6));
         assert_eq!(response.new_cursor_pos, CursorPos { x: 3, y: 4 });
     }
 
@@ -1077,16 +1084,7 @@ mod test {
             &response.new_cursor_pos,
             b"01234\n01234\n01234\n01234\n0123",
         );
-        println!(
-            "visible: {:?}",
-            std::str::from_utf8(&terminal_buffer.data().visible)
-        );
-        println!(
-            "scrollback: {:?}",
-            std::str::from_utf8(&terminal_buffer.data().scrollback)
-        );
-        assert_eq!(response.visible_to_scrollback, (0..5, 0..3));
-        assert_eq!(response.written_range, (0..24));
+        assert_eq!(response.written_range, (BufPos::new(0, 1)..BufPos::new(4, 5)));
         assert_eq!(response.new_cursor_pos, CursorPos { x: 4, y: 4 });
     }
 }

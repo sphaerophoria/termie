@@ -519,10 +519,10 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                         .terminal_buffer
                         .insert_data(&self.cursor_state.pos, &data);
                     // FIXME: Not complete
-                    self.format_tracker
-                        .delete_range(response.visible_to_scrollback.0);
-                    self.format_tracker
-                        .push_range(&self.cursor_state, response.written_range);
+                    //self.format_tracker
+                    //    .delete_range(response.visible_to_scrollback.0);
+                    //self.format_tracker
+                    //    .push_range(&self.cursor_state, response.written_range);
                     self.cursor_state.pos = response.new_cursor_pos;
                 }
                 TerminalOutput::SetCursorPos { x, y } => {
