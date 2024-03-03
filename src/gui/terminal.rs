@@ -375,7 +375,7 @@ fn render_terminal_output<Io: TermIo>(
     let terminal_data = terminal_emulator.data();
     let mut scrollback_data: &[u8] = &terminal_data.scrollback;
     let mut canvas_data: &[u8] = &terminal_data.visible;
-    println!("{:?}", std::str::from_utf8(&canvas_data));
+    println!("{:?}", std::str::from_utf8(canvas_data));
     let mut format_data = terminal_emulator.format_data();
 
     // Arguably incorrect. Scrollback does end with a newline, and that newline causes a blank

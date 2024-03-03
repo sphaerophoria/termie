@@ -1,4 +1,4 @@
-use std::{fmt, num::TryFromIntError, path::PathBuf, ops::Range};
+use std::{fmt, num::TryFromIntError, ops::Range, path::PathBuf};
 
 use ansi::{AnsiParser, SelectGraphicRendition, TerminalOutput};
 use buffer::TerminalBuffer2;
@@ -124,37 +124,6 @@ impl TerminalInput {
     }
 }
 
-fn split_format_data_for_scrollback(
-    tags: Vec<FormatTag>,
-    scrollback_split: usize,
-) -> TerminalData<Vec<FormatTag>> {
-    let scrollback_tags = tags
-        .iter()
-        .filter(|tag| tag.start < scrollback_split)
-        .cloned()
-        .map(|mut tag| {
-            tag.end = tag.end.min(scrollback_split);
-            tag
-        })
-        .collect();
-
-    let canvas_tags = tags
-        .into_iter()
-        .filter(|tag| tag.end > scrollback_split)
-        .map(|mut tag| {
-            tag.start = tag.start.saturating_sub(scrollback_split);
-            if tag.end != usize::MAX {
-                tag.end -= scrollback_split;
-            }
-            tag
-        })
-        .collect();
-
-    TerminalData {
-        scrollback: scrollback_tags,
-        visible: canvas_tags,
-    }
-}
 
 #[derive(Debug, Error)]
 enum SnapshotCursorPosErrorPriv {
@@ -713,7 +682,7 @@ impl<Io: TermIo> TerminalEmulator<Io> {
         let map_input_to_output = move |idx: usize| {
             println!("line mapping: {:?}", idx);
             if idx == usize::MAX {
-                return idx
+                return idx;
             }
             let line_for_idx = idx / width;
             let pos_in_line = idx % width;
@@ -776,97 +745,6 @@ impl<Io: TermIo> TerminalEmulator<Io> {
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn test_format_tracker_scrollback_split() {
-        let tags = vec![
-            FormatTag {
-                start: 0,
-                end: 5,
-                color: TerminalColor::Blue,
-                bold: true,
-            },
-            FormatTag {
-                start: 5,
-                end: 7,
-                color: TerminalColor::Red,
-                bold: false,
-            },
-            FormatTag {
-                start: 7,
-                end: 10,
-                color: TerminalColor::Blue,
-                bold: true,
-            },
-            FormatTag {
-                start: 10,
-                end: usize::MAX,
-                color: TerminalColor::Red,
-                bold: true,
-            },
-        ];
-
-        // Case 1: no split
-        let res = split_format_data_for_scrollback(tags.clone(), 0);
-        assert_eq!(res.scrollback, &[]);
-        assert_eq!(res.visible, &tags[..]);
-
-        // Case 2: Split on a boundary
-        let res = split_format_data_for_scrollback(tags.clone(), 10);
-        assert_eq!(res.scrollback, &tags[0..3]);
-        assert_eq!(
-            res.visible,
-            &[FormatTag {
-                start: 0,
-                end: usize::MAX,
-                color: TerminalColor::Red,
-                bold: true,
-            },]
-        );
-
-        // Case 3: Split a segment
-        let res = split_format_data_for_scrollback(tags.clone(), 9);
-        assert_eq!(
-            res.scrollback,
-            &[
-                FormatTag {
-                    start: 0,
-                    end: 5,
-                    color: TerminalColor::Blue,
-                    bold: true,
-                },
-                FormatTag {
-                    start: 5,
-                    end: 7,
-                    color: TerminalColor::Red,
-                    bold: false,
-                },
-                FormatTag {
-                    start: 7,
-                    end: 9,
-                    color: TerminalColor::Blue,
-                    bold: true,
-                },
-            ]
-        );
-        assert_eq!(
-            res.visible,
-            &[
-                FormatTag {
-                    start: 0,
-                    end: 1,
-                    color: TerminalColor::Blue,
-                    bold: true,
-                },
-                FormatTag {
-                    start: 1,
-                    end: usize::MAX,
-                    color: TerminalColor::Red,
-                    bold: true,
-                },
-            ]
-        );
-    }
 
     #[test]
     fn test_cursor_state_snapshot() {

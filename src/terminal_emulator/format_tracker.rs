@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::{num::TryFromIntError, ops::Range};
 
 use super::{recording::NotIntOfType, CursorState, TerminalColor};
