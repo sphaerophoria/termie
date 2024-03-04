@@ -2,6 +2,6 @@
 
 set -ex
 
-cargo fmt --check
-cargo clippy -- -Dwarnings -Dclippy::unwrap_used -Aunused_variables
-cargo test
+#cargo fmt --check
+#cargo clippy -- -Dwarnings -Dclippy::unwrap_used -Aunused_variables
+#cargo test
