@@ -1,11 +1,11 @@
 #![allow(unused)]
 use std::{num::TryFromIntError, ops::Range};
 
-use super::{recording::NotIntOfType, CursorState, TerminalColor};
+use super::{recording::NotIntOfType, CursorState, TerminalColor, buffer::BufPos};
 use crate::terminal_emulator::recording::SnapshotItem;
 use thiserror::Error;
 
-fn ranges_overlap(a: Range<usize>, b: Range<usize>) -> bool {
+fn ranges_overlap(a: Range<BufPos>, b: Range<BufPos>) -> bool {
     if a.end <= b.start {
         return false;
     }
@@ -19,27 +19,27 @@ fn ranges_overlap(a: Range<usize>, b: Range<usize>) -> bool {
 /// if a and b overlap like
 /// a:  [         ]
 /// b:      [  ]
-fn range_fully_conatins(a: &Range<usize>, b: &Range<usize>) -> bool {
+fn range_fully_conatins(a: &Range<BufPos>, b: &Range<BufPos>) -> bool {
     a.start <= b.start && a.end >= b.end
 }
 
 /// if a and b overlap like
 /// a:     [      ]
 /// b:  [     ]
-fn range_starts_overlapping(a: &Range<usize>, b: &Range<usize>) -> bool {
+fn range_starts_overlapping(a: &Range<BufPos>, b: &Range<BufPos>) -> bool {
     a.start > b.start && a.end > b.end
 }
 
 /// if a and b overlap like
 /// a: [      ]
 /// b:    [      ]
-fn range_ends_overlapping(a: &Range<usize>, b: &Range<usize>) -> bool {
+fn range_ends_overlapping(a: &Range<BufPos>, b: &Range<BufPos>) -> bool {
     range_starts_overlapping(b, a)
 }
 
 fn adjust_existing_format_range(
-    existing_elem: &mut FormatTag,
-    range: &Range<usize>,
+    existing_elem: &mut FormatTagInternal,
+    range: &Range<BufPos>,
 ) -> ColorRangeAdjustment {
     let mut ret = ColorRangeAdjustment {
         should_delete: false,
@@ -55,7 +55,7 @@ fn adjust_existing_format_range(
         }
 
         if range.end != existing_elem.end {
-            ret.to_insert = Some(FormatTag {
+            ret.to_insert = Some(FormatTagInternal {
                 start: range.end,
                 end: existing_elem.end,
                 color: existing_elem.color,
@@ -76,7 +76,7 @@ fn adjust_existing_format_range(
         }
     } else {
         panic!(
-            "Unhandled case {}-{}, {}-{}",
+            "Unhandled case {:?}-{:?}, {:?}-{:?}",
             existing_elem.start, existing_elem.end, range.start, range.end
         );
     }
@@ -91,7 +91,15 @@ fn delete_items_from_vec<T>(mut to_delete: Vec<usize>, vec: &mut Vec<T>) {
     }
 }
 
-fn adjust_existing_format_ranges(existing: &mut Vec<FormatTag>, range: &Range<usize>) {
+// [0..5] blue
+//
+// [2..3] red
+//
+// [0..2] blue
+// [2..3] red
+// [3..5] blue
+//
+fn adjust_existing_format_ranges(existing: &mut Vec<FormatTagInternal>, range: &Range<BufPos>) {
     let mut effected_infos = existing
         .iter_mut()
         .enumerate()
@@ -118,7 +126,7 @@ struct ColorRangeAdjustment {
     // If a range adjustment results in a 0 width element we need to delete it
     should_delete: bool,
     // If a range was split we need to insert a new one
-    to_insert: Option<FormatTag>,
+    to_insert: Option<FormatTagInternal>,
 }
 
 #[derive(Debug, Error)]
@@ -166,29 +174,37 @@ mod format_tag_keys {
     pub const BOLD: &str = "bold";
 }
 
+// BufPos <-- col,line in terminal buffer storage
+// CursorPos <-- col,line in visible area
+// SerializedIdx <-- scrollback + visible -> "asdflkajsdflkasdjf" + "asdflkjasdf"
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FormatTag {
+pub struct FormatTagSerialized {
     pub start: usize,
     pub end: usize,
     pub color: TerminalColor,
     pub bold: bool,
 }
 
-impl FormatTag {
-    fn from_snapshot(snapshot: SnapshotItem) -> Result<FormatTag, LoadFormatTagSnapshotError> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FormatTagInternal {
+    pub start: BufPos,
+    pub end: BufPos,
+    pub color: TerminalColor,
+    pub bold: bool,
+}
+
+
+impl FormatTagInternal {
+    fn from_snapshot(snapshot: SnapshotItem) -> Result<FormatTagInternal, LoadFormatTagSnapshotError> {
         use LoadFormatTagSnapshotError::*;
         let mut root = snapshot.into_map().map_err(|_| RootNotMap)?;
 
         let start = root.remove(format_tag_keys::START).ok_or(StartMissing)?;
-        let start = start.into_num::<usize>().map_err(StartNotUsize)?;
+        let start = BufPos::from_snapshot(start);
 
         let end = root.remove(format_tag_keys::END).ok_or(EndMissing)?;
-        let end = end.into_i64().map_err(|_| EndNotInt)?;
-        let end: usize = if end == -1 {
-            usize::MAX
-        } else {
-            end.try_into().map_err(EndNotUsize)?
-        };
+        let end = BufPos::from_snapshot(end);
 
         let bold = root.remove(format_tag_keys::BOLD).ok_or(BoldMissing)?;
         let bold = bold.into_bool().map_err(|_| BoldNotBool)?;
@@ -197,7 +213,7 @@ impl FormatTag {
         let color = color.into_string().map_err(|_| ColorNotString)?;
         let color = color.parse().map_err(ParseColor)?;
 
-        Ok(FormatTag {
+        Ok(FormatTagInternal {
             start,
             end,
             bold,
@@ -207,15 +223,9 @@ impl FormatTag {
 
     fn snapshot(&self) -> Result<SnapshotItem, SnapshotFormatTagError> {
         use SnapshotFormatTagErrorKind::*;
-        let start_i64: i64 = self.start.try_into().map_err(StartNotI64)?;
-        let end_i64: i64 = if self.end == usize::MAX {
-            -1
-        } else {
-            self.end.try_into().map_err(EndNotI64)?
-        };
         let arr = [
-            (format_tag_keys::START.to_string(), start_i64.into()),
-            (format_tag_keys::END.to_string(), end_i64.into()),
+            (format_tag_keys::START.to_string(), self.start.snapshot()),
+            (format_tag_keys::END.to_string(), self.end.snapshot()),
             (
                 format_tag_keys::COLOR.to_string(),
                 self.color.to_string().into(),
@@ -239,15 +249,15 @@ enum LoadFormatTrackerSnapshotErrorKind {
 pub struct LoadFormatTrackerSnapshotError(#[from] LoadFormatTrackerSnapshotErrorKind);
 
 pub struct FormatTracker {
-    color_info: Vec<FormatTag>,
+    color_info: Vec<FormatTagInternal>,
 }
 
 impl FormatTracker {
     pub fn new() -> FormatTracker {
         FormatTracker {
-            color_info: vec![FormatTag {
-                start: 0,
-                end: usize::MAX,
+            color_info: vec![FormatTagInternal {
+                start: BufPos::new(0, 0),
+                end: BufPos::MAX,
                 color: TerminalColor::Default,
                 bold: false,
             }],
@@ -260,8 +270,8 @@ impl FormatTracker {
         use LoadFormatTrackerSnapshotErrorKind::*;
         let arr = snapshot.into_vec().map_err(|_| NotArray)?;
 
-        let color_info: Result<Vec<FormatTag>, LoadFormatTagSnapshotError> =
-            arr.into_iter().map(FormatTag::from_snapshot).collect();
+        let color_info: Result<Vec<FormatTagInternal>, LoadFormatTagSnapshotError> =
+            arr.into_iter().map(FormatTagInternal::from_snapshot).collect();
         let color_info = color_info.map_err(LoadTag)?;
         Ok(FormatTracker { color_info })
     }
@@ -270,15 +280,15 @@ impl FormatTracker {
         Ok(SnapshotItem::Array(
             self.color_info
                 .iter()
-                .map(FormatTag::snapshot)
+                .map(FormatTagInternal::snapshot)
                 .collect::<Result<Vec<_>, _>>()?,
         ))
     }
 
-    pub fn push_range(&mut self, cursor: &CursorState, range: Range<usize>) {
+    pub fn push_range(&mut self, cursor: &CursorState, range: Range<BufPos>) {
         adjust_existing_format_ranges(&mut self.color_info, &range);
 
-        self.color_info.push(FormatTag {
+        self.color_info.push(FormatTagInternal {
             start: range.start,
             end: range.end,
             color: cursor.color,
@@ -292,70 +302,70 @@ impl FormatTracker {
 
     /// Move all tags > range.start to range.start + range.len
     /// No gaps in coloring data, so one range must expand instead of just be adjusted
-    pub fn push_range_adjustment(&mut self, range: Range<usize>) {
-        let range_len = range.end - range.start;
-        for info in &mut self.color_info {
-            if info.end <= range.start {
-                continue;
-            }
+    //pub fn push_range_adjustment(&mut self, range: Range<usize>) {
+    //    let range_len = range.end - range.start;
+    //    for info in &mut self.color_info {
+    //        if info.end <= range.start {
+    //            continue;
+    //        }
 
-            if info.start > range.start {
-                info.start += range_len;
-                if info.end != usize::MAX {
-                    info.end += range_len;
-                }
-            } else if info.end != usize::MAX {
-                info.end += range_len;
-            }
-        }
-    }
+    //        if info.start > range.start {
+    //            info.start += range_len;
+    //            if info.end != usize::MAX {
+    //                info.end += range_len;
+    //            }
+    //        } else if info.end != usize::MAX {
+    //            info.end += range_len;
+    //        }
+    //    }
+    //}
 
-    pub fn tags(&self) -> Vec<FormatTag> {
+    pub fn tags(&self) -> Vec<FormatTagInternal> {
         self.color_info.clone()
     }
 
-    pub fn delete_range(&mut self, range: Range<usize>) {
-        let mut to_delete = Vec::new();
-        let del_size = range.end - range.start;
+    //pub fn delete_range(&mut self, range: Range<usize>) {
+    //    let mut to_delete = Vec::new();
+    //    let del_size = range.end - range.start;
 
-        for (i, info) in &mut self.color_info.iter_mut().enumerate() {
-            let info_range = info.start..info.end;
-            if info.end <= range.start {
-                continue;
-            }
+    //    for (i, info) in &mut self.color_info.iter_mut().enumerate() {
+    //        let info_range = info.start..info.end;
+    //        if info.end <= range.start {
+    //            continue;
+    //        }
 
-            if ranges_overlap(range.clone(), info_range.clone()) {
-                if range_fully_conatins(&range, &info_range) {
-                    to_delete.push(i);
-                } else if range_starts_overlapping(&range, &info_range) {
-                    if info.end != usize::MAX {
-                        info.end = range.start;
-                    }
-                } else if range_ends_overlapping(&range, &info_range) {
-                    info.start = range.start;
-                    if info.end != usize::MAX {
-                        info.end -= del_size;
-                    }
-                } else if range_fully_conatins(&info_range, &range) {
-                    if info.end != usize::MAX {
-                        info.end -= del_size;
-                    }
-                } else {
-                    panic!("Unhandled overlap");
-                }
-            } else {
-                assert!(!ranges_overlap(range.clone(), info_range.clone()));
-                info.start -= del_size;
-                if info.end != usize::MAX {
-                    info.end -= del_size;
-                }
-            }
-        }
+    //        if ranges_overlap(range.clone(), info_range.clone()) {
+    //            if range_fully_conatins(&range, &info_range) {
+    //                to_delete.push(i);
+    //            } else if range_starts_overlapping(&range, &info_range) {
+    //                if info.end != usize::MAX {
+    //                    info.end = range.start;
+    //                }
+    //            } else if range_ends_overlapping(&range, &info_range) {
+    //                info.start = range.start;
+    //                if info.end != usize::MAX {
+    //                    info.end -= del_size;
+    //                }
+    //            } else if range_fully_conatins(&info_range, &range) {
+    //                if info.end != usize::MAX {
+    //                    info.end -= del_size;
+    //                }
+    //            } else {
+    //                panic!("Unhandled overlap");
+    //            }
+    //        } else {
+    //            assert!(!ranges_overlap(range.clone(), info_range.clone()));
+    //            info.start -= del_size;
+    //            if info.end != usize::MAX {
+    //                info.end -= del_size;
+    //            }
+    //        }
+    //    }
 
-        for i in to_delete.into_iter().rev() {
-            self.color_info.remove(i);
-        }
-    }
+    //    for i in to_delete.into_iter().rev() {
+    //        self.color_info.remove(i);
+    //    }
+    //}
 }
 
 #[cfg(test)]
@@ -378,19 +388,19 @@ mod test {
         assert_eq!(
             tags,
             &[
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 3,
                     color: TerminalColor::Default,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 3,
                     end: 10,
                     color: TerminalColor::Yellow,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 10,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -405,31 +415,31 @@ mod test {
         assert_eq!(
             tags,
             &[
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 3,
                     color: TerminalColor::Default,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 3,
                     end: 5,
                     color: TerminalColor::Yellow,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 5,
                     end: 7,
                     color: TerminalColor::Blue,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 7,
                     end: 10,
                     color: TerminalColor::Yellow,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 10,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -444,37 +454,37 @@ mod test {
         assert_eq!(
             tags,
             &[
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 3,
                     color: TerminalColor::Default,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 3,
                     end: 5,
                     color: TerminalColor::Yellow,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 5,
                     end: 7,
                     color: TerminalColor::Blue,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 7,
                     end: 9,
                     color: TerminalColor::Green,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 9,
                     end: 10,
                     color: TerminalColor::Yellow,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 10,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -490,31 +500,31 @@ mod test {
         assert_eq!(
             tags,
             &[
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 3,
                     color: TerminalColor::Default,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 3,
                     end: 5,
                     color: TerminalColor::Yellow,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 5,
                     end: 6,
                     color: TerminalColor::Blue,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 6,
                     end: 11,
                     color: TerminalColor::Red,
                     bold: true
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 11,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -550,19 +560,19 @@ mod test {
         assert_eq!(
             format_tracker.tags(),
             [
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 8,
                     color: TerminalColor::Blue,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 8,
                     end: 18,
                     color: TerminalColor::Red,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 18,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -575,19 +585,19 @@ mod test {
         assert_eq!(
             format_tracker.tags(),
             [
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 6,
                     color: TerminalColor::Blue,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 6,
                     end: 16,
                     color: TerminalColor::Red,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 16,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -600,19 +610,19 @@ mod test {
         assert_eq!(
             format_tracker.tags(),
             [
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 4,
                     color: TerminalColor::Blue,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 4,
                     end: 14,
                     color: TerminalColor::Red,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 14,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -625,19 +635,19 @@ mod test {
         assert_eq!(
             format_tracker.tags(),
             [
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 2,
                     color: TerminalColor::Blue,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 2,
                     end: 9,
                     color: TerminalColor::Red,
                     bold: false
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 9,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -662,19 +672,19 @@ mod test {
         assert_eq!(
             format_tracker.tags(),
             [
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 5,
                     color: TerminalColor::Blue,
                     bold: false,
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 5,
                     end: 10,
                     color: TerminalColor::Red,
                     bold: false,
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 10,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -688,19 +698,19 @@ mod test {
         assert_eq!(
             format_tracker.tags(),
             [
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 8,
                     color: TerminalColor::Blue,
                     bold: false,
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 8,
                     end: 13,
                     color: TerminalColor::Red,
                     bold: false,
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 13,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -714,19 +724,19 @@ mod test {
         assert_eq!(
             format_tracker.tags(),
             [
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 8,
                     color: TerminalColor::Blue,
                     bold: false,
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 8,
                     end: 13,
                     color: TerminalColor::Red,
                     bold: false,
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 13,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -741,19 +751,19 @@ mod test {
         assert_eq!(
             format_tracker.tags(),
             [
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 8,
                     color: TerminalColor::Blue,
                     bold: false,
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 8,
                     end: 15,
                     color: TerminalColor::Red,
                     bold: false,
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 15,
                     end: usize::MAX,
                     color: TerminalColor::Default,
@@ -765,7 +775,7 @@ mod test {
 
     #[test]
     fn test_format_tag_snapshot() {
-        let tag = FormatTag {
+        let tag = FormatTagSerialized {
             start: 0,
             // Edge case test, usize max needs to be set to -1
             end: usize::MAX,
@@ -773,18 +783,18 @@ mod test {
             bold: true,
         };
 
-        let loaded = FormatTag::from_snapshot(tag.snapshot().expect("failed to snapshot"))
+        let loaded = FormatTagSerialized::from_snapshot(tag.snapshot().expect("failed to snapshot"))
             .expect("failed to load snapshot");
         assert_eq!(loaded, tag);
 
-        let tag = FormatTag {
+        let tag = FormatTagSerialized {
             start: 50,
             // Edge case test, usize max needs to be set to -1
             end: 105,
             color: TerminalColor::Red,
             bold: false,
         };
-        let loaded = FormatTag::from_snapshot(tag.snapshot().expect("failed to snapshot"))
+        let loaded = FormatTagSerialized::from_snapshot(tag.snapshot().expect("failed to snapshot"))
             .expect("failed to load snapshot");
         assert_eq!(loaded, tag);
     }
@@ -793,13 +803,13 @@ mod test {
     fn test_format_tracker_snapshot() {
         let tracker = FormatTracker {
             color_info: vec![
-                FormatTag {
+                FormatTagSerialized {
                     start: 0,
                     end: 5,
                     color: TerminalColor::Black,
                     bold: false,
                 },
-                FormatTag {
+                FormatTagSerialized {
                     start: 5,
                     end: usize::MAX,
                     color: TerminalColor::Red,

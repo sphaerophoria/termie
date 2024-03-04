@@ -1,6 +1,6 @@
 use crate::error::backtraced_err;
 use crate::terminal_emulator::{
-    CursorPos, FormatTag, TermIo, TerminalColor, TerminalEmulator, TerminalInput,
+    CursorPos, FormatTagSerialized, TermIo, TerminalColor, TerminalEmulator, TerminalInput,
 };
 use eframe::egui::{
     self, text::LayoutJob, Color32, Context, DragValue, Event, FontData, FontDefinitions,
@@ -282,7 +282,7 @@ fn create_terminal_output_layout_job(
 fn add_terminal_data_to_ui(
     ui: &mut Ui,
     data: &[u8],
-    format_data: &[FormatTag],
+    format_data: &[FormatTagSerialized],
     font_size: f32,
     render_newlines: bool,
 ) -> Result<egui::Response, std::str::Utf8Error> {

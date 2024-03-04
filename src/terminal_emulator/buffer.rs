@@ -42,8 +42,13 @@ pub struct TerminalBufferSetWinSizeResponse {
     pub new_cursor_pos: CursorPos,
 }
 
+mod buf_pos_keys {
+    pub const LINE_ID: &str = "line_id";
+    pub const X_POS: &str = "x_pos";
+}
 // Cursor pos <-- visible location
-#[derive(Debug, PartialEq)]
+// FIXME: Should this be copy?
+#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Clone, Copy)]
 pub struct BufPos {
     /// Line id refers to a line at the time of writing in the visible buffer
     /// Once the line is in scrollback, we could have 1 "line" split over multiple visible lines,
@@ -51,15 +56,47 @@ pub struct BufPos {
     /// This is because of resize... at any given time the visible buffer will have a one to one
     /// mapping
     /// This allows us to have a constant id for a character across visible and scrollback areas
-    line_id: usize,
-    x_pos: usize,
+    pub line_id: usize,
+    pub x_pos: usize,
 }
 
 impl BufPos {
-    fn new(x_pos: usize, line_id: usize) -> BufPos {
+    pub const MAX: BufPos = BufPos { line_id: usize::MAX, x_pos: usize::MAX };
+    pub fn new(x_pos: usize, line_id: usize) -> BufPos {
         BufPos {
             x_pos, line_id,
         }
+    }
+
+    pub fn from_snapshot(root: SnapshotItem) -> BufPos {
+        use buf_pos_keys::*;
+        let mut root = root.into_map().unwrap();
+
+        let load_usize_from_i64_w_neg_1 = |v: SnapshotItem| {
+            let v = v.into_i64().unwrap();
+            if v == -1 {
+                return usize::MAX;
+            }
+            v.try_into().unwrap()
+        };
+        let line_id = load_usize_from_i64_w_neg_1(root.remove(LINE_ID).unwrap());
+        let x_pos = load_usize_from_i64_w_neg_1(root.remove(X_POS).unwrap());
+
+        BufPos { line_id, x_pos }
+    }
+
+    pub fn snapshot(&self) -> SnapshotItem {
+        use buf_pos_keys::*;
+        let usize_to_i64_w_max = |v: usize| {
+            if v == usize::MAX {
+                return SnapshotItem::Int(-1);
+            }
+            v.try_into().unwrap()
+        };
+        SnapshotItem::Map([
+            (LINE_ID.to_string(), usize_to_i64_w_max(self.line_id)),
+            (X_POS.to_string(), usize_to_i64_w_max(self.x_pos))
+        ].into())
     }
 }
 
@@ -207,7 +244,7 @@ impl Line<'_> {
 struct VisibleBufferSerializeResponse {
     data: Vec<u8>,
     /// Line id -> range in data
-    line_mappings: Vec<Range<usize>>,
+    line_mappings: Vec<usize>,
 }
 
 mod visible_buffer_keys {
@@ -293,15 +330,15 @@ impl VisibleBuffer {
                 data.push(b'\n');
             }
 
-            line_mappings.push(line_start..data.len());
+            line_mappings.push(line_start);
             line_start = data.len();
         }
 
         data.extend(lines[last_line_with_content].serialize());
-        line_mappings.push(line_start..data.len());
+        line_mappings.push(line_start);
 
         for _ in last_line_with_content + 1..self.height {
-            line_mappings.push(data.len()..data.len());
+            line_mappings.push(data.len());
         }
 
         if !data.is_empty() {
@@ -624,8 +661,6 @@ impl TerminalBuffer2 {
             source.clear();
         }
 
-        println!("{:?}", lines);
-
         // FIXME: Formatting completely broken
         TerminalBufferInsertLineResponse {
             deleted_range: 0..0,
@@ -681,21 +716,28 @@ impl TerminalBuffer2 {
 
     // FIXME: no mut
     pub fn data(&mut self) -> TerminalData2 {
-        let VisibleBufferSerializeResponse {
-            data,
-            line_mappings,
-        } = self.visible_buf.serialize();
+        let visible_response = self.visible_buf.serialize();
         let scrollback = self.scrollback.clone();
+        let scrollback_line_mappings = self.scrollback_line_positions.clone();
         //println!("scrollback: {:?}", scrollback);
         TerminalData2 {
             scrollback,
-            visible: data,
-            line_mappings,
+            visible: visible_response.data,
+            visible_line_mappings: visible_response.line_mappings,
+            scrollback_line_mappings,
         }
     }
 
     pub fn get_win_size(&self) -> (usize, usize) {
         (self.visible_buf.width, self.visible_buf.height)
+    }
+
+    pub fn get_visible_range(&self) -> Range<BufPos> {
+        let first_visible_line_id = self.scrollback_line_positions.len();
+        let end_x = self.visible_buf.width;
+        let end_y = self.visible_buf.height + first_visible_line_id;
+
+        BufPos::new(0, first_visible_line_id)..BufPos::new(end_x, end_y)
     }
 
     pub fn set_win_size(

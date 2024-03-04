@@ -128,6 +128,15 @@ impl_from_int_ref!(i64);
 impl_from_str!(&str);
 impl_from_str!(String);
 
+impl TryFrom<usize> for SnapshotItem {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        let v_i64: i64 = value.try_into()?;
+        Ok(SnapshotItem::Int(v_i64))
+    }
+}
+
 impl From<bool> for SnapshotItem {
     fn from(value: bool) -> Self {
         SnapshotItem::Bool(value)

@@ -1,11 +1,11 @@
 use std::{fmt, num::TryFromIntError, ops::Range, path::PathBuf};
 
 use ansi::{AnsiParser, SelectGraphicRendition, TerminalOutput};
-use buffer::TerminalBuffer2;
+use buffer::{BufPos, TerminalBuffer2};
 use format_tracker::FormatTracker;
 use recording::{NotIntOfType, Recorder};
 
-pub use format_tracker::FormatTag;
+pub use format_tracker::FormatTagSerialized;
 pub use io::{PtyIo, TermIo};
 pub use recording::{LoadRecordingError, Recording, RecordingHandle, SnapshotItem};
 pub use replay::{ControlAction, RecordingAction, ReplayControl, ReplayIo};
@@ -337,8 +337,10 @@ pub struct TerminalData2 {
     // FIXME: slice?
     pub scrollback: Vec<u8>,
     pub visible: Vec<u8>,
-    // Maybe indicative of bad abstraction
-    pub line_mappings: Vec<Range<usize>>,
+    // Line id -> buf pos
+    pub scrollback_line_mappings: Vec<usize>,
+    // line id - scrollback_line_mappings.len()
+    pub visible_line_mappings: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -479,14 +481,22 @@ impl<Io: TermIo> TerminalEmulator<Io> {
         width_chars: usize,
         height_chars: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let visible_range = self.terminal_buffer.get_visible_range();
         let response =
             self.terminal_buffer
                 .set_win_size(width_chars, height_chars, &self.cursor_state.pos);
+
+
+        // Get old format
+        // Clear visible format data
+        // Re-insert new format data with resized window
         self.cursor_state.pos = response.new_cursor_pos;
 
         if response.changed {
             self.io.set_win_size(width_chars, height_chars)?;
             self.recorder.set_win_size(width_chars, height_chars);
+            // FIXME: Preserve coloring info
+            self.format_tracker.push_range(&self.cursor_state, BufPos::new(0, 0)..BufPos::MAX);
         }
 
         Ok(())
@@ -521,8 +531,8 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     // FIXME: Not complete
                     //self.format_tracker
                     //    .delete_range(response.visible_to_scrollback.0);
-                    //self.format_tracker
-                    //    .push_range(&self.cursor_state, response.written_range);
+                    self.format_tracker
+                        .push_range(&self.cursor_state, response.written_range);
                     self.cursor_state.pos = response.new_cursor_pos;
                 }
                 TerminalOutput::SetCursorPos { x, y } => {
@@ -565,7 +575,7 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                 }
                 TerminalOutput::ClearAll => {
                     self.format_tracker
-                        .push_range(&self.cursor_state, 0..usize::MAX);
+                        .push_range(&self.cursor_state, BufPos::new(0, 0)..BufPos::MAX);
                     self.terminal_buffer.clear_all();
                 }
                 TerminalOutput::ClearLineForwards => {
@@ -578,6 +588,9 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                 }
                 TerminalOutput::CarriageReturn => {
                     self.cursor_state.pos.x = 0;
+                }
+                TerminalOutput::Newline => {
+                    self.cursor_state.pos = self.terminal_buffer.insert_data(&self.cursor_state.pos, b"\n").new_cursor_pos;
                 }
                 TerminalOutput::Backspace => {
                     if self.cursor_state.pos.x >= 1 {
@@ -670,22 +683,37 @@ impl<Io: TermIo> TerminalEmulator<Io> {
     }
 
     // FIXME: no mut
-    pub fn format_data(&mut self) -> TerminalData<Vec<FormatTag>> {
+    pub fn format_data(&mut self) -> TerminalData<Vec<FormatTagSerialized>> {
         let (width, height) = self.get_win_size();
         let mut output_tags = Vec::new();
+        let mut scrollback_tags = Vec::new();
         // FIXME: serializing twice just to get format data
         let data = self.terminal_buffer.data();
-        //let offset = self.terminal_buffer.data().scrollback.len();
-        //split_format_data_for_scrollback(self.format_tracker.tags(), offset)
-        println!("{:?}", data.line_mappings);
-        let map_input_to_output = move |idx: usize| {
-            println!("line mapping: {:?}", idx);
-            if idx == usize::MAX {
-                return idx;
+
+        #[derive(Eq, PartialEq, Ord, PartialOrd)]
+        enum SerializedPos {
+            Scrollback(usize),
+            Visible(usize),
+        }
+
+        let map_input_to_output = |idx: BufPos| -> SerializedPos {
+            let num_scrollback_lines = data.scrollback_line_mappings.len();
+            let num_visible_lines = data.visible_line_mappings.len();
+            if idx.line_id < num_scrollback_lines {
+                let ret = data.scrollback_line_mappings[idx.line_id] + idx.x_pos;
+                let max = data.scrollback_line_mappings.get(idx.line_id + 1).cloned().unwrap_or(data.scrollback.len());
+                SerializedPos::Scrollback(ret.min(max))
+            } else if idx.line_id < num_scrollback_lines + num_visible_lines {
+                let ret = data.visible_line_mappings[idx.line_id - num_scrollback_lines] + idx.x_pos;
+                let max = data.visible_line_mappings.get(idx.line_id - num_scrollback_lines + 1).cloned().unwrap_or(data.visible.len());
+                SerializedPos::Visible(ret.min(max))
+            } else if idx == BufPos::MAX {
+                //
+                SerializedPos::Visible(usize::MAX)
+            } else {
+                // FIXME: is this right?
+                SerializedPos::Visible(0)
             }
-            let line_for_idx = idx / width;
-            let pos_in_line = idx % width;
-            data.line_mappings[line_for_idx].start + pos_in_line
         };
 
         let input_tags = self.format_tracker.tags();
@@ -694,16 +722,57 @@ impl<Io: TermIo> TerminalEmulator<Io> {
             let start = map_input_to_output(input_tag.start);
             let end = map_input_to_output(input_tag.end);
 
-            let mut output_tag = input_tag.clone();
-            output_tag.start = start;
-            output_tag.end = end;
+            assert!(start <= end);
+            match (start, end) {
+                (SerializedPos::Scrollback(start), SerializedPos::Scrollback(end)) => {
+                    let output_tag = FormatTagSerialized {
+                        start,
+                        end,
+                        bold: input_tag.bold,
+                        color: input_tag.color,
+                    };
 
-            output_tags.push(output_tag)
+                    assert!(start <= end);
+                    scrollback_tags.push(output_tag);
+                }
+                (SerializedPos::Visible(start), SerializedPos::Visible(end)) => {
+                    let output_tag = FormatTagSerialized {
+                        start,
+                        end,
+                        bold: input_tag.bold,
+                        color: input_tag.color,
+                    };
+                    assert!(start <= end);
+
+                    output_tags.push(output_tag);
+                }
+                (SerializedPos::Scrollback(start), SerializedPos::Visible(end)) => {
+                    let scrollback_tag = FormatTagSerialized {
+                        start,
+                        end: data.scrollback.len(),
+                        bold: input_tag.bold,
+                        color: input_tag.color,
+                    };
+
+                    scrollback_tags.push(scrollback_tag);
+
+                    let visible_tag = FormatTagSerialized {
+                        start: 0,
+                        end,
+                        bold: input_tag.bold,
+                        color: input_tag.color,
+                    };
+                    output_tags.push(visible_tag);
+                }
+                (SerializedPos::Visible(_), SerializedPos::Scrollback(_)) => {
+                    panic!("Backwards range");
+                }
+            }
         }
 
         println!("output_tags: {:?}", output_tags);
         TerminalData {
-            scrollback: Vec::new(),
+            scrollback: scrollback_tags,
             visible: output_tags,
         }
     }
